@@ -7,6 +7,7 @@ An open-source log viewer inspired by Microsoft's CMTrace.exe, built with **Taur
 ## Features
 
 ### Log Viewer
+
 - **CCM format** (`<![LOG[...]LOG]!>`) — full SCCM/ConfigMgr log parsing
 - **Simple format** (`$$<` delimited) — text-based severity detection
 - **Plain text** fallback with automatic format detection
@@ -21,6 +22,7 @@ An open-source log viewer inspired by Microsoft's CMTrace.exe, built with **Taur
 - **Clipboard copy** — Ctrl+C copies selected entries
 
 ### Intune Diagnostics
+
 - **IME log analysis** — parses IntuneManagementExtension.log files
 - **Event timeline** — color-coded vertical timeline with status indicators
 - **Event types** — Win32 App, WinGet App, PowerShell Script, Remediation, ESP, Sync Session
@@ -31,7 +33,7 @@ An open-source log viewer inspired by Microsoft's CMTrace.exe, built with **Taur
 ### Keyboard Shortcuts
 
 | Shortcut | Action |
-|----------|--------|
+| -------- | ------ |
 | Ctrl+O | Open file |
 | Ctrl+F | Find |
 | Ctrl+L | Filter |
@@ -66,20 +68,21 @@ npm run tauri build
 ### Build Output
 
 Production builds are located at:
+
 - **macOS**: `src-tauri/target/release/bundle/macos/CMTrace Open.app`
 - **Windows**: `src-tauri/target/release/bundle/nsis/CMTrace Open_x.x.x_x64-setup.exe`
 - **Linux**: `src-tauri/target/release/bundle/deb/` and `appimage/`
 
 ## Architecture
 
-```
+```text
 React Frontend (TypeScript)          Tauri IPC           Rust Backend
 ┌─────────────────────────┐     ┌──────────┐     ┌─────────────────────┐
 │ LogListView (virtual)   │◄────┤ invoke() │────►│ Parser (CCM/Simple) │
-│ InfoPane (detail view)  │     │ Events   │     │ FileWatcher (notify) │
-│ Toolbar (highlight)     │     └──────────┘     │ ErrorDB (120+ codes) │
-│ FilterDialog (4×6)      │                      │ IntuneEngine         │
-│ IntuneDashboard         │                      │ AppState (Mutex)     │
+│ InfoPane (detail view)  │     │ Events   │     │ FileWatcher (notify)│
+│ Toolbar (highlight)     │     └──────────┘     │ ErrorDB (120+ codes)│
+│ FilterDialog (4×6)      │                      │ IntuneEngine        │
+│ IntuneDashboard         │                      │ AppState (Mutex)    │
 └─────────────────────────┘                      └─────────────────────┘
 ```
 
@@ -89,7 +92,7 @@ React Frontend (TypeScript)          Tauri IPC           Rust Backend
 
 ## Project Structure
 
-```
+```text
 src/                          # React frontend
 ├── components/
 │   ├── layout/               # AppShell, Toolbar, StatusBar
@@ -116,7 +119,7 @@ src-tauri/src/                # Rust backend
 Benchmarked on Apple Silicon (M-series):
 
 | Operation | 100K lines (18 MB) |
-|-----------|-------------------|
+| --- | --- |
 | File parse | ~360ms |
 | Intune analysis | ~3.4s |
 | Parse throughput | ~278K lines/sec |
