@@ -18,6 +18,8 @@ pub enum LogFormat {
     Simple,
     /// Plain text (no structured format detected)
     Plain,
+    /// Generic timestamped format (ISO 8601, slash-dates, syslog, time-only)
+    Timestamped,
 }
 
 /// A single parsed log entry.

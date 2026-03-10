@@ -1,5 +1,5 @@
 export type Severity = "Info" | "Warning" | "Error";
-export type LogFormat = "Ccm" | "Simple" | "Plain";
+export type LogFormat = "Ccm" | "Simple" | "Plain" | "Timestamped";
 
 export interface LogEntry {
   id: number;

@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 use crate::models::log_entry::{LogEntry, LogFormat};
+use crate::parser::timestamped::DateOrder;
 use crate::watcher::tail::TailSession;
 
 /// Represents a currently open log file.
@@ -12,6 +13,8 @@ pub struct OpenFile {
     pub format: LogFormat,
     /// Current byte offset for tail tracking
     pub byte_offset: u64,
+    /// Date field ordering for timestamped format (US vs EU)
+    pub date_order: DateOrder,
 }
 
 /// Application-wide managed state.

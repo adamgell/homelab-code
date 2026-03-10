@@ -1,9 +1,10 @@
 //! Plain text fallback parser.
 //!
-//! Used when no structured format (CCM or Simple) is detected.
+//! Used when no structured format (CCM, Simple, or Timestamped) is detected.
 //! Each line becomes a LogEntry with text-based severity detection.
 
-use crate::models::log_entry::{LogEntry, LogFormat, Severity};
+use crate::models::log_entry::{LogEntry, LogFormat};
+use super::severity::detect_severity_from_text;
 
 /// Parse all lines as plain text.
 pub fn parse_lines(lines: &[&str], file_path: &str) -> (Vec<LogEntry>, u32) {
@@ -14,16 +15,7 @@ pub fn parse_lines(lines: &[&str], file_path: &str) -> (Vec<LogEntry>, u32) {
             continue;
         }
 
-        let lower = line.to_lowercase();
-        let severity = if lower.contains("error")
-            || (lower.contains("fail") && !lower.contains("failover"))
-        {
-            Severity::Error
-        } else if lower.contains("warn") {
-            Severity::Warning
-        } else {
-            Severity::Info
-        };
+        let severity = detect_severity_from_text(line);
 
         entries.push(LogEntry {
             id: i as u64,

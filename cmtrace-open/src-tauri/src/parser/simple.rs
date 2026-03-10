@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::models::log_entry::{LogEntry, LogFormat, Severity};
+use super::severity::detect_severity_from_text;
 
 /// Regex for the timestamp portion: <MM-dd-yyyy HH:mm:ss.fff±TTTTT>
 static TIMESTAMP_RE: Lazy<Regex> = Lazy::new(|| {
@@ -95,21 +96,6 @@ struct SimpleParsed {
     thread: Option<u32>,
     thread_display: Option<String>,
     timezone_offset: i32,
-}
-
-/// Text-based severity detection matching CMTrace's binary behavior.
-fn detect_severity_from_text(text: &str) -> Severity {
-    let lower = text.to_lowercase();
-    if lower.contains("error") {
-        return Severity::Error;
-    }
-    if lower.contains("fail") && !lower.contains("failover") {
-        return Severity::Error;
-    }
-    if lower.contains("warn") {
-        return Severity::Warning;
-    }
-    Severity::Info
 }
 
 /// Parse all lines as simple format.

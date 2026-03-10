@@ -37,6 +37,15 @@ pub fn start_tail(
         }
     }
 
+    // Look up date_order from AppState (stored during open_log_file)
+    let date_order = {
+        let open_files = state.open_files.lock().map_err(|e| e.to_string())?;
+        open_files
+            .get(&path_buf)
+            .map(|f| f.date_order)
+            .unwrap_or_default()
+    };
+
     let file_path_for_event = path.clone();
     let session = tail::start_tail_session(
         path_buf.clone(),
@@ -44,6 +53,7 @@ pub fn start_tail(
         format,
         next_id,
         next_line,
+        date_order,
         move |entries| {
             let payload = TailPayload {
                 entries,

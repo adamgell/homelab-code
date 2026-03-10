@@ -6,6 +6,7 @@ use std::sync::Arc;
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::models::log_entry::{LogEntry, LogFormat};
+use crate::parser::timestamped::DateOrder;
 
 /// Manages incremental reading of a log file from a tracked byte offset.
 pub struct TailReader {
@@ -16,11 +17,20 @@ pub struct TailReader {
     next_line: u32,
     /// Leftover partial line from previous read (file might be written mid-line)
     partial_line: String,
+    /// Date field ordering for timestamped format
+    date_order: DateOrder,
 }
 
 impl TailReader {
     /// Create a new TailReader starting after the initial parse.
-    pub fn new(path: PathBuf, byte_offset: u64, format: LogFormat, next_id: u64, next_line: u32) -> Self {
+    pub fn new(
+        path: PathBuf,
+        byte_offset: u64,
+        format: LogFormat,
+        next_id: u64,
+        next_line: u32,
+        date_order: DateOrder,
+    ) -> Self {
         Self {
             path,
             byte_offset,
@@ -28,6 +38,7 @@ impl TailReader {
             next_id,
             next_line,
             partial_line: String::new(),
+            date_order,
         }
     }
 
@@ -100,6 +111,9 @@ impl TailReader {
             LogFormat::Ccm => crate::parser::ccm::parse_lines(&lines, &path_str),
             LogFormat::Simple => crate::parser::simple::parse_lines(&lines, &path_str),
             LogFormat::Plain => crate::parser::plain::parse_lines(&lines, &path_str),
+            LogFormat::Timestamped => {
+                crate::parser::timestamped::parse_lines(&lines, &path_str, self.date_order)
+            }
         };
 
         // Update IDs and line numbers to be sequential from where we left off
@@ -148,6 +162,7 @@ pub fn start_tail_session<F>(
     format: LogFormat,
     next_id: u64,
     next_line: u32,
+    date_order: DateOrder,
     on_new_entries: F,
 ) -> Result<TailSession, String>
 where
@@ -167,6 +182,7 @@ where
             format,
             next_id,
             next_line,
+            date_order,
         );
 
         // Create a channel for notify events

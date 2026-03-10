@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use crate::models::log_entry::{LogEntry, LogFormat, Severity};
+use super::severity::detect_severity_from_text;
 
 /// Compiled regex matching a complete CCM log line.
 ///
@@ -156,22 +157,6 @@ pub fn parse_lines(lines: &[&str], file_path: &str) -> (Vec<LogEntry>, u32) {
     }
 
     (entries, errors)
-}
-
-/// Text-based severity detection for lines without a type field.
-/// Matches CMTrace's binary behavior: check "error" then "fail" (exclude "failover") then "warn".
-fn detect_severity_from_text(text: &str) -> Severity {
-    let lower = text.to_lowercase();
-    if lower.contains("error") {
-        return Severity::Error;
-    }
-    if lower.contains("fail") && !lower.contains("failover") {
-        return Severity::Error;
-    }
-    if lower.contains("warn") {
-        return Severity::Warning;
-    }
-    Severity::Info
 }
 
 #[cfg(test)]

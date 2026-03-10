@@ -32,7 +32,7 @@ fn bench_parse_100k_lines() {
     let parse_ms = start.elapsed().as_millis();
 
     match result {
-        Ok(r) => {
+        Ok((r, _date_order)) => {
             eprintln!("Parse: {}ms ({} entries, {} errors, format: {:?})",
                 parse_ms, r.entries.len(), r.parse_errors, r.format_detected);
             eprintln!("Throughput: {:.0} lines/sec", r.entries.len() as f64 / (parse_ms as f64 / 1000.0));

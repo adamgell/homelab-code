@@ -2,38 +2,45 @@ pub mod ccm;
 pub mod simple;
 pub mod plain;
 pub mod detect;
+pub mod severity;
+pub mod timestamped;
 
 use crate::models::log_entry::{LogFormat, ParseResult};
+use crate::parser::timestamped::DateOrder;
 use std::path::Path;
 
 /// Parse a log file, auto-detecting its format.
-pub fn parse_file(path: &str) -> Result<ParseResult, String> {
+/// Returns the parse result and the detected date order (relevant for Timestamped format).
+pub fn parse_file(path: &str) -> Result<(ParseResult, DateOrder), String> {
     let path_obj = Path::new(path);
     let content = read_file_content(path)?;
     let file_size = std::fs::metadata(path)
         .map(|m| m.len())
         .unwrap_or(0);
 
-    let format = detect::detect_format(&content);
+    let detected = detect::detect_format(&content);
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len() as u32;
 
-    let (entries, parse_errors) = match format {
+    let (entries, parse_errors) = match detected.format {
         LogFormat::Ccm => ccm::parse_lines(&lines, path),
         LogFormat::Simple => simple::parse_lines(&lines, path),
         LogFormat::Plain => plain::parse_lines(&lines, path),
+        LogFormat::Timestamped => timestamped::parse_lines(&lines, path, detected.date_order),
     };
 
-    Ok(ParseResult {
+    let result = ParseResult {
         entries,
-        format_detected: format,
+        format_detected: detected.format,
         total_lines,
         parse_errors,
         file_path: path_obj.to_string_lossy().to_string(),
         file_size,
         // After initial parse, the byte offset is the file size
         byte_offset: file_size,
-    })
+    };
+
+    Ok((result, detected.date_order))
 }
 
 /// Read file content, handling BOM and encoding fallback.
