@@ -2,7 +2,7 @@
 
 An open-source log viewer inspired by Microsoft's CMTrace.exe, built with **Tauri v2 + React + TypeScript + Rust**. Includes built-in Intune Management Extension diagnostics.
 
-![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)
+![MIT License](https://img.shields.io/badge/license-MIT-blue.svg) [![CMTrace Open: Release](https://github.com/adamgell/homelab-code/actions/workflows/cmtrace-release.yml/badge.svg)](https://github.com/adamgell/homelab-code/actions/workflows/cmtrace-release.yml)
 
 ## Features
 
