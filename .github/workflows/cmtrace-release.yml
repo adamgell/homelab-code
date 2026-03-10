@@ -78,6 +78,6 @@ jobs:
             | macOS (ARM) | `.dmg` disk image |
             | macOS (Intel) | `.dmg` disk image |
             | Linux (x64) | `.deb` / `.AppImage` |
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
