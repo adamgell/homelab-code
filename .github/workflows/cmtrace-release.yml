@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+      - "[0-9]*.[0-9]*.[0-9]*"
+      - "!*.*.*.*"
 
 defaults:
   run:
@@ -78,6 +80,6 @@ jobs:
             | macOS (ARM) | `.dmg` disk image |
             | macOS (Intel) | `.dmg` disk image |
             | Linux (x64) | `.deb` / `.AppImage` |
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: --target ${{ matrix.target }}
