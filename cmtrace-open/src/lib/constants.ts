@@ -25,3 +25,22 @@ export const COLUMN_NAMES = {
   dateTime: "Date/Time",
   thread: "Thread",
 } as const;
+
+export const LOG_VIEW_COLUMN_WIDTHS = {
+  component: 180,
+  dateTime: 200,
+  thread: 120,
+} as const;
+
+export function getLogViewGridTemplateColumns(showDetails: boolean): string {
+  if (!showDetails) {
+    return "minmax(0, 1fr)";
+  }
+
+  return [
+    "minmax(0, 1fr)",
+    `${LOG_VIEW_COLUMN_WIDTHS.component}px`,
+    `${LOG_VIEW_COLUMN_WIDTHS.dateTime}px`,
+    `${LOG_VIEW_COLUMN_WIDTHS.thread}px`,
+  ].join(" ");
+}

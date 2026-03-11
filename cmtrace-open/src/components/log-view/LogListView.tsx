@@ -1,10 +1,20 @@
-import { useRef, useEffect, useCallback, useMemo, useState } from "react";
+import {
+  useRef,
+  useEffect,
+  useCallback,
+  useMemo,
+  useState,
+  useLayoutEffect,
+} from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useLogStore } from "../../stores/log-store";
 import { useUiStore } from "../../stores/ui-store";
 import { useFilterStore } from "../../stores/filter-store";
 import { LogRow } from "./LogRow";
-import { COLUMN_NAMES } from "../../lib/constants";
+import {
+  COLUMN_NAMES,
+  getLogViewGridTemplateColumns,
+} from "../../lib/constants";
 
 export function LogListView() {
   const entries = useLogStore((s) => s.entries);
@@ -17,6 +27,7 @@ export function LogListView() {
   const filteredIds = useFilterStore((s) => s.filteredIds);
 
   const [hasKeyboardFocus, setHasKeyboardFocus] = useState(false);
+  const [scrollbarWidth, setScrollbarWidth] = useState(0);
 
   const displayEntries = useMemo(() => {
     if (!filteredIds) return entries;
@@ -30,6 +41,10 @@ export function LogListView() {
 
   const parentRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
+  const gridTemplateColumns = useMemo(
+    () => getLogViewGridTemplateColumns(showDetails),
+    [showDetails]
+  );
 
   const virtualizer = useVirtualizer({
     count: displayEntries.length,
@@ -48,6 +63,17 @@ export function LogListView() {
     const threshold = 50;
     isAtBottomRef.current =
       element.scrollHeight - element.scrollTop - element.clientHeight < threshold;
+  }, []);
+
+  const updateScrollbarWidth = useCallback(() => {
+    const element = parentRef.current;
+
+    if (!element) {
+      setScrollbarWidth(0);
+      return;
+    }
+
+    setScrollbarWidth(element.offsetWidth - element.clientWidth);
   }, []);
 
   const prevCount = useRef(displayEntries.length);
@@ -73,6 +99,26 @@ export function LogListView() {
     virtualizer.scrollToIndex(selectedEntryIndex, { align: "center" });
   }, [selectedEntryIndex, virtualizer]);
 
+  useLayoutEffect(() => {
+    updateScrollbarWidth();
+
+    const element = parentRef.current;
+
+    if (!element || typeof ResizeObserver === "undefined") {
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      updateScrollbarWidth();
+    });
+
+    observer.observe(element);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [displayEntries.length, showDetails, updateScrollbarWidth]);
+
   const activeRowDomId =
     selectedEntryIndex >= 0
       ? `log-list-row-${displayEntries[selectedEntryIndex].id}`
@@ -89,7 +135,8 @@ export function LogListView() {
     >
       <div
         style={{
-          display: "flex",
+          display: "grid",
+          gridTemplateColumns,
           backgroundColor: "#f0f0f0",
           borderBottom: "2px solid #c0c0c0",
           fontSize: "13px",
@@ -98,12 +145,16 @@ export function LogListView() {
           lineHeight: "24px",
           whiteSpace: "nowrap",
           flexShrink: 0,
+          boxSizing: "border-box",
+          paddingRight: `${scrollbarWidth}px`,
         }}
       >
         <div
           style={{
-            flex: showDetails ? 3 : 1,
+            minWidth: 0,
             padding: "1px 4px",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
           }}
         >
           {COLUMN_NAMES.logText}
@@ -112,30 +163,30 @@ export function LogListView() {
           <>
             <div
               style={{
-                width: "180px",
-                minWidth: "180px",
                 padding: "1px 4px",
                 borderLeft: "1px solid #c0c0c0",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
               }}
             >
               {COLUMN_NAMES.component}
             </div>
             <div
               style={{
-                width: "200px",
-                minWidth: "200px",
                 padding: "1px 4px",
                 borderLeft: "1px solid #c0c0c0",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
               }}
             >
               {COLUMN_NAMES.dateTime}
             </div>
             <div
               style={{
-                width: "120px",
-                minWidth: "120px",
                 padding: "1px 4px",
                 borderLeft: "1px solid #c0c0c0",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
               }}
             >
               {COLUMN_NAMES.thread}
@@ -160,6 +211,7 @@ export function LogListView() {
           overflow: "auto",
           outline: "none",
           boxShadow: hasKeyboardFocus ? "inset 0 0 0 1px #0078D7" : "none",
+          scrollbarGutter: "stable",
         }}
       >
         <div

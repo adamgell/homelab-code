@@ -772,125 +772,125 @@ function SummaryView({
         }}
       >
         <div ref={coverageSectionRef}>
-        <SectionCard
-          title="Diagnostics Coverage"
-          subtitle="Source continuity, timestamp bounds, and dominant evidence."
-        >
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: "8px",
-              marginBottom: diagnosticsCoverage.files.length > 0 ? "10px" : 0,
-            }}
+          <SectionCard
+            title="Diagnostics Coverage"
+            subtitle="Source continuity, timestamp bounds, and dominant evidence."
           >
-            <CompactFact label="Files" value={String(diagnosticsCoverage.files.length)} />
-            <CompactFact label="Contributing" value={String(contributingFileCount)} color="#2563eb" />
-            <CompactFact
-              label="Rotated"
-              value={diagnosticsCoverage.hasRotatedLogs ? "Yes" : "No"}
-              color={diagnosticsCoverage.hasRotatedLogs ? "#b45309" : "#475569"}
-            />
-            {diagnosticsCoverage.dominantSource && (
-              <CompactFact
-                label="Dominant"
-                value={buildDominantSourceLabel(diagnosticsCoverage.dominantSource)}
-                color="#0f766e"
-              />
-            )}
-          </div>
-
-          {diagnosticsCoverage.timestampBounds && (
             <div
               style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: "8px",
                 marginBottom: diagnosticsCoverage.files.length > 0 ? "10px" : 0,
-                padding: "8px 10px",
-                borderRadius: "6px",
-                backgroundColor: "#f8fafc",
-                border: "1px solid #e2e8f0",
-                color: "#334155",
-                fontSize: "12px",
               }}
             >
-              <strong style={{ color: "#0f172a" }}>Timestamp Bounds:</strong>{" "}
-              {formatTimestampBounds(diagnosticsCoverage.timestampBounds)}
-            </div>
-          )}
-
-          {diagnosticsCoverage.files.length > 0 ? (
-            <div>
-              <button
-                onClick={() => setShowCoverageDetails((current) => !current)}
-                style={secondaryToggleButtonStyle}
-              >
-                {showCoverageDetails
-                  ? "Hide file coverage"
-                  : `Show file coverage (${diagnosticsCoverage.files.length})`}
-              </button>
-              {showCoverageDetails && (
-                <div style={{ display: "grid", gap: "6px", marginTop: "10px" }}>
-                  {diagnosticsCoverage.files.map((file) => (
-                    <CoverageRow key={file.filePath} file={file} />
-                  ))}
-                </div>
+              <CompactFact label="Files" value={String(diagnosticsCoverage.files.length)} />
+              <CompactFact label="Contributing" value={String(contributingFileCount)} color="#2563eb" />
+              <CompactFact
+                label="Rotated"
+                value={diagnosticsCoverage.hasRotatedLogs ? "Yes" : "No"}
+                color={diagnosticsCoverage.hasRotatedLogs ? "#b45309" : "#475569"}
+              />
+              {diagnosticsCoverage.dominantSource && (
+                <CompactFact
+                  label="Dominant"
+                  value={buildDominantSourceLabel(diagnosticsCoverage.dominantSource)}
+                  color="#0f766e"
+                />
               )}
             </div>
-          ) : (
-            <EmptyStateText label="No file-level coverage evidence was available." />
-          )}
-        </SectionCard>
+
+            {diagnosticsCoverage.timestampBounds && (
+              <div
+                style={{
+                  marginBottom: diagnosticsCoverage.files.length > 0 ? "10px" : 0,
+                  padding: "8px 10px",
+                  borderRadius: "6px",
+                  backgroundColor: "#f8fafc",
+                  border: "1px solid #e2e8f0",
+                  color: "#334155",
+                  fontSize: "12px",
+                }}
+              >
+                <strong style={{ color: "#0f172a" }}>Timestamp Bounds:</strong>{" "}
+                {formatTimestampBounds(diagnosticsCoverage.timestampBounds)}
+              </div>
+            )}
+
+            {diagnosticsCoverage.files.length > 0 ? (
+              <div>
+                <button
+                  onClick={() => setShowCoverageDetails((current) => !current)}
+                  style={secondaryToggleButtonStyle}
+                >
+                  {showCoverageDetails
+                    ? "Hide file coverage"
+                    : `Show file coverage (${diagnosticsCoverage.files.length})`}
+                </button>
+                {showCoverageDetails && (
+                  <div style={{ display: "grid", gap: "6px", marginTop: "10px" }}>
+                    {diagnosticsCoverage.files.map((file) => (
+                      <CoverageRow key={file.filePath} file={file} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <EmptyStateText label="No file-level coverage evidence was available." />
+            )}
+          </SectionCard>
         </div>
 
         <div ref={confidenceSectionRef}>
-        <SectionCard
-          title="Confidence"
-          subtitle="Why this summary is strong, partial, or still tentative."
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: "12px",
-              marginBottom: "10px",
-              flexWrap: "wrap",
-            }}
+          <SectionCard
+            title="Confidence"
+            subtitle="Why this summary is strong, partial, or still tentative."
           >
-            <ConfidenceBadge confidence={diagnosticsConfidence} />
-            <div style={{ fontSize: "12px", color: "#475569" }}>
-              {diagnosticsConfidence.score != null
-                ? `Score ${(diagnosticsConfidence.score * 100).toFixed(0)}%`
-                : "Score unavailable"}
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "12px",
+                marginBottom: "10px",
+                flexWrap: "wrap",
+              }}
+            >
+              <ConfidenceBadge confidence={diagnosticsConfidence} />
+              <div style={{ fontSize: "12px", color: "#475569" }}>
+                {diagnosticsConfidence.score != null
+                  ? `Score ${(diagnosticsConfidence.score * 100).toFixed(0)}%`
+                  : "Score unavailable"}
+              </div>
             </div>
-          </div>
 
-          {diagnosticsConfidence.reasons.length > 0 ? (
-            <>
-              <ul style={{ margin: 0, paddingLeft: "18px", color: "#1f2937" }}>
-              {visibleConfidenceReasons.map((reason) => (
-                <li key={reason} style={{ marginBottom: "4px", lineHeight: 1.35 }}>
-                  {reason}
-                </li>
-              ))}
-              </ul>
-              {(hiddenConfidenceReasonCount > 0 || diagnosticsConfidence.reasons.length > 2) && (
-                <button
-                  onClick={() => setShowAllConfidenceReasons((current) => !current)}
-                  style={{
-                    ...secondaryToggleButtonStyle,
-                    marginTop: "8px",
-                  }}
-                >
-                  {showAllConfidenceReasons
-                    ? "Show less"
-                    : `Show all (${diagnosticsConfidence.reasons.length})`}
-                </button>
-              )}
-            </>
-          ) : (
-            <EmptyStateText label="No confidence rationale was available." />
-          )}
-        </SectionCard>
+            {diagnosticsConfidence.reasons.length > 0 ? (
+              <>
+                <ul style={{ margin: 0, paddingLeft: "18px", color: "#1f2937" }}>
+                  {visibleConfidenceReasons.map((reason) => (
+                    <li key={reason} style={{ marginBottom: "4px", lineHeight: 1.35 }}>
+                      {reason}
+                    </li>
+                  ))}
+                </ul>
+                {(hiddenConfidenceReasonCount > 0 || diagnosticsConfidence.reasons.length > 2) && (
+                  <button
+                    onClick={() => setShowAllConfidenceReasons((current) => !current)}
+                    style={{
+                      ...secondaryToggleButtonStyle,
+                      marginTop: "8px",
+                    }}
+                  >
+                    {showAllConfidenceReasons
+                      ? "Show less"
+                      : `Show all (${diagnosticsConfidence.reasons.length})`}
+                  </button>
+                )}
+              </>
+            ) : (
+              <EmptyStateText label="No confidence rationale was available." />
+            )}
+          </SectionCard>
         </div>
       </div>
 

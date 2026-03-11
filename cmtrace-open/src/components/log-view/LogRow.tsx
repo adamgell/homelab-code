@@ -1,5 +1,5 @@
 import type { LogEntry } from "../../types/log";
-import { COLORS } from "../../lib/constants";
+import { COLORS, getLogViewGridTemplateColumns } from "../../lib/constants";
 
 interface LogRowProps {
   entry: LogEntry;
@@ -16,7 +16,6 @@ function getRowStyle(entry: LogEntry, isSelected: boolean) {
     return {
       backgroundColor: "#0078D7",
       color: "#FFFFFF",
-      borderLeft: "3px solid #FFFFFF",
     };
   }
 
@@ -25,19 +24,16 @@ function getRowStyle(entry: LogEntry, isSelected: boolean) {
       return {
         backgroundColor: COLORS.error.background,
         color: COLORS.error.text,
-        borderLeft: "3px solid transparent",
       };
     case "Warning":
       return {
         backgroundColor: COLORS.warning.background,
         color: COLORS.warning.text,
-        borderLeft: "3px solid transparent",
       };
     default:
       return {
         backgroundColor: COLORS.info.background,
         color: COLORS.info.text,
-        borderLeft: "3px solid transparent",
       };
   }
 }
@@ -87,6 +83,7 @@ export function LogRow({
   onClick,
 }: LogRowProps) {
   const style = getRowStyle(entry, isSelected);
+  const gridTemplateColumns = getLogViewGridTemplateColumns(showDetails);
 
   return (
     <div
@@ -97,7 +94,8 @@ export function LogRow({
       className="log-row"
       style={{
         ...style,
-        display: "flex",
+        display: "grid",
+        gridTemplateColumns,
         cursor: "pointer",
         borderBottom: "1px solid #e0e0e0",
         fontSize: "13px",
@@ -105,13 +103,14 @@ export function LogRow({
         lineHeight: "20px",
         whiteSpace: "nowrap",
         transition: "filter 80ms linear",
+        boxShadow: `inset 3px 0 0 ${isSelected ? "#FFFFFF" : "transparent"}`,
       }}
       onClick={() => onClick(entry.id)}
     >
       <div
         className="col-message"
         style={{
-          flex: showDetails ? 3 : 1,
+          minWidth: 0,
           overflow: "hidden",
           textOverflow: "ellipsis",
           padding: "1px 4px",
@@ -124,8 +123,6 @@ export function LogRow({
           <div
             className="col-component"
             style={{
-              width: "180px",
-              minWidth: "180px",
               overflow: "hidden",
               textOverflow: "ellipsis",
               padding: "1px 4px",
@@ -137,8 +134,6 @@ export function LogRow({
           <div
             className="col-datetime"
             style={{
-              width: "200px",
-              minWidth: "200px",
               overflow: "hidden",
               textOverflow: "ellipsis",
               padding: "1px 4px",
@@ -150,8 +145,6 @@ export function LogRow({
           <div
             className="col-thread"
             style={{
-              width: "120px",
-              minWidth: "120px",
               overflow: "hidden",
               textOverflow: "ellipsis",
               padding: "1px 4px",
