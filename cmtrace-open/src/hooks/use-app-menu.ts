@@ -16,8 +16,8 @@ interface AppMenuActionPayload {
 
 export function useAppMenu() {
   const {
-    openLogFileDialog,
-    openLogFolderDialog,
+    openSourceFileDialog,
+    openSourceFolderDialog,
     openKnownSourceCatalogAction,
     showFindDialog,
     showFilterDialog,
@@ -42,10 +42,10 @@ export function useAppMenu() {
       try {
         switch (payload.action) {
           case "open_log_file_dialog":
-            await openLogFileDialog();
+            await openSourceFileDialog();
             return;
           case "open_log_folder_dialog":
-            await openLogFolderDialog();
+            await openSourceFolderDialog();
             return;
           case "show_find":
             showFindDialog();
@@ -110,8 +110,8 @@ export function useAppMenu() {
     };
   }, [
     openKnownSourceCatalogAction,
-    openLogFileDialog,
-    openLogFolderDialog,
+    openSourceFileDialog,
+    openSourceFolderDialog,
     refreshActiveSource,
     showAboutDialog,
     showErrorLookupDialog,

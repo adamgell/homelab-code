@@ -13,6 +13,7 @@ import {
   getUiChromeStatus,
   useUiStore,
 } from "../../stores/ui-store";
+import { useIntuneStore } from "../../stores/intune-store";
 
 export function StatusBar() {
   const entries = useLogStore((s) => s.entries);
@@ -30,6 +31,10 @@ export function StatusBar() {
   const activeView = useUiStore((s) => s.activeView);
   const showDetails = useUiStore((s) => s.showDetails);
   const showInfoPane = useUiStore((s) => s.showInfoPane);
+  const intuneAnalysisState = useIntuneStore((s) => s.analysisState);
+  const intuneSummary = useIntuneStore((s) => s.summary);
+  const intuneSourceContext = useIntuneStore((s) => s.sourceContext);
+  const intuneTimelineScope = useIntuneStore((s) => s.timelineScope);
 
   const filterClauseCount = useFilterStore((s) => s.clauses.length);
   const filteredIds = useFilterStore((s) => s.filteredIds);
@@ -37,7 +42,7 @@ export function StatusBar() {
   const filterError = useFilterStore((s) => s.filterError);
 
   let elapsedText = "";
-  if (selectedId !== null && entries.length > 0) {
+  if (activeView === "log" && selectedId !== null && entries.length > 0) {
     const firstEntry = entries[0];
     const selectedEntry = entries.find((e) => e.id === selectedId);
     if (firstEntry?.timestamp && selectedEntry?.timestamp) {
@@ -69,37 +74,85 @@ export function StatusBar() {
     filterError
   );
 
-  const leftParts = [
-    streamStatus.label,
-    uiChromeStatus.viewLabel,
-    uiChromeStatus.detailsLabel,
-    uiChromeStatus.infoLabel,
-    activeFileName ? `Source ${activeFileName}` : `Source ${activeSourceLabel}`,
-  ];
+  let leftParts: string[] = [];
+  let rightStatusText = "";
 
-  if (elapsedText) {
-    leftParts.push(elapsedText);
+  if (activeView === "log") {
+    leftParts = [
+      streamStatus.label,
+      uiChromeStatus.viewLabel,
+      uiChromeStatus.detailsLabel,
+      uiChromeStatus.infoLabel,
+      activeFileName ? `Source ${activeFileName}` : `Source ${activeSourceLabel}`,
+    ];
+
+    if (elapsedText) {
+      leftParts.push(elapsedText);
+    }
+
+    const logStatusText =
+      entries.length > 0
+        ? `${entries.length} entries | ${totalLines} lines | ${formatDetected ?? "Unknown"} format`
+        : failureReason
+          ? `Reason: ${failureReason}`
+          : sourceStatus.kind !== "idle"
+            ? sourceStatus.detail ?? sourceStatus.message
+            : "";
+
+    const filterStatusText =
+      filterError
+        ? `Filter error: ${filterError}`
+        : filterStatus.label;
+
+    rightStatusText = [logStatusText, filterStatusText]
+      .filter((part) => part.length > 0)
+      .join(" | ");
+  } else {
+    const intuneSourceLabel = getBaseName(
+      intuneAnalysisState.requestedPath ?? intuneSourceContext.analyzedPath
+    );
+
+    leftParts = [
+      "Intune Diagnostics",
+      intuneAnalysisState.phase === "analyzing"
+        ? "Analyzing"
+        : intuneAnalysisState.phase === "error"
+          ? "Analysis failed"
+          : intuneAnalysisState.phase === "empty"
+            ? "No IME logs found"
+            : intuneSummary
+              ? `Events ${intuneSummary.totalEvents}`
+              : "No analysis",
+    ];
+
+    if (intuneSourceLabel) {
+      leftParts.push(`Source ${intuneSourceLabel}`);
+    }
+
+    if (intuneTimelineScope.filePath) {
+      leftParts.push(`Timeline ${getBaseName(intuneTimelineScope.filePath)}`);
+    }
+
+    if (intuneAnalysisState.phase === "analyzing") {
+      rightStatusText = intuneAnalysisState.detail ?? intuneAnalysisState.message;
+    } else if (intuneAnalysisState.phase === "error" || intuneAnalysisState.phase === "empty") {
+      rightStatusText = [intuneAnalysisState.message, intuneAnalysisState.detail]
+        .filter((part): part is string => Boolean(part))
+        .join(" | ");
+    } else if (intuneSummary) {
+      rightStatusText = [
+        `${intuneSummary.totalEvents} events`,
+        `${intuneSummary.totalDownloads} downloads`,
+        intuneSummary.logTimeSpan,
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(" | ");
+    } else {
+      rightStatusText = intuneAnalysisState.message;
+    }
   }
 
   const leftStatusText = leftParts.join(" • ");
-
-  const logStatusText =
-    entries.length > 0
-      ? `${entries.length} entries | ${totalLines} lines | ${formatDetected ?? "Unknown"} format`
-      : failureReason
-        ? `Reason: ${failureReason}`
-        : sourceStatus.kind !== "idle"
-          ? sourceStatus.detail ?? sourceStatus.message
-          : "";
-
-  const filterStatusText =
-    filterError
-      ? `Filter error: ${filterError}`
-      : filterStatus.label;
-
-  const rightStatusText = [logStatusText, filterStatusText]
-    .filter((part) => part.length > 0)
-    .join(" | ");
 
   return (
     <div
@@ -130,7 +183,18 @@ export function StatusBar() {
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",
-          color: filterStatus.tone === "error" ? "#991b1b" : undefined,
+          color:
+            activeView === "intune"
+              ? intuneAnalysisState.phase === "error"
+                ? "#991b1b"
+                : intuneAnalysisState.phase === "empty"
+                  ? "#92400e"
+                  : intuneAnalysisState.phase === "analyzing"
+                    ? "#1d4ed8"
+                    : undefined
+              : filterStatus.tone === "error"
+                ? "#991b1b"
+                : undefined,
         }}
       >
         {rightStatusText}

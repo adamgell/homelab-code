@@ -73,6 +73,33 @@ export interface IntuneDiagnosticInsight {
   suggestedFixes: string[];
 }
 
+export interface IntuneSourceContext {
+  analyzedPath: string | null;
+  includedFiles: string[];
+}
+
+export interface IntuneSourceSelection {
+  filePath: string | null;
+  lineNumber: number | null;
+}
+
+export interface IntuneTimelineScope {
+  filePath: string | null;
+}
+
+export type IntuneAnalysisPhase = "idle" | "analyzing" | "ready" | "empty" | "error";
+
+export type IntuneAnalysisSourceKind = "file" | "folder" | "known" | "unknown";
+
+export interface IntuneAnalysisState {
+  phase: IntuneAnalysisPhase;
+  requestedPath: string | null;
+  requestedKind: IntuneAnalysisSourceKind | null;
+  message: string;
+  detail: string | null;
+  lastError: string | null;
+}
+
 export interface IntuneAnalysisResult {
   events: IntuneEvent[];
   downloads: DownloadStat[];

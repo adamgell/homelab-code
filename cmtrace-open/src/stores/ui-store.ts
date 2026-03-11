@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
-type AppView = "log" | "intune";
+export type WorkspaceId = "log" | "intune";
+export type AppView = WorkspaceId;
 
 export interface UiChromeStatus {
   viewLabel: string;
@@ -29,6 +30,7 @@ export function getUiChromeStatus(
 }
 
 interface UiState {
+  activeWorkspace: WorkspaceId;
   activeView: AppView;
   showInfoPane: boolean;
   showDetails: boolean;
@@ -38,7 +40,9 @@ interface UiState {
   showErrorLookupDialog: boolean;
   showAboutDialog: boolean;
 
+  setActiveWorkspace: (workspace: WorkspaceId) => void;
   setActiveView: (view: AppView) => void;
+  ensureWorkspaceVisible: (workspace: WorkspaceId, trigger: string) => void;
   ensureLogViewVisible: (trigger: string) => void;
   toggleInfoPane: () => void;
   toggleDetails: () => void;
@@ -50,8 +54,11 @@ interface UiState {
   closeTransientDialogs: (trigger: string) => void;
 }
 
+const DEFAULT_WORKSPACE: WorkspaceId = "log";
+
 export const useUiStore = create<UiState>((set, get) => ({
-  activeView: "log" as AppView,
+  activeWorkspace: DEFAULT_WORKSPACE,
+  activeView: DEFAULT_WORKSPACE,
   showInfoPane: true,
   showDetails: true,
   infoPaneHeight: 200,
@@ -60,28 +67,44 @@ export const useUiStore = create<UiState>((set, get) => ({
   showErrorLookupDialog: false,
   showAboutDialog: false,
 
-  setActiveView: (view) => {
-    const previousView = get().activeView;
+  setActiveWorkspace: (workspace) => {
+    const previousWorkspace = get().activeWorkspace;
 
-    if (previousView === view) {
+    if (previousWorkspace === workspace) {
       return;
     }
 
-    console.info("[ui-store] changing active view", {
-      previousView,
-      view,
+    console.info("[ui-store] changing active workspace", {
+      previousWorkspace,
+      workspace,
     });
 
-    set({ activeView: view });
+    set({
+      activeWorkspace: workspace,
+      activeView: workspace,
+    });
   },
-  ensureLogViewVisible: (trigger) => {
-    if (get().activeView === "log") {
-      console.info("[ui-store] log view already visible", { trigger });
+  setActiveView: (view) => {
+    get().setActiveWorkspace(view);
+  },
+  ensureWorkspaceVisible: (workspace, trigger) => {
+    if (get().activeWorkspace === workspace) {
+      console.info("[ui-store] workspace already visible", { trigger, workspace });
       return;
     }
 
-    console.info("[ui-store] switching to log view for command", { trigger });
-    set({ activeView: "log" });
+    console.info("[ui-store] switching workspace for command", {
+      trigger,
+      workspace,
+    });
+
+    set({
+      activeWorkspace: workspace,
+      activeView: workspace,
+    });
+  },
+  ensureLogViewVisible: (trigger) => {
+    get().ensureWorkspaceVisible("log", trigger);
   },
   toggleInfoPane: () =>
     set((state) => ({ showInfoPane: !state.showInfoPane })),

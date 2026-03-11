@@ -1,8 +1,6 @@
-import { useState, useCallback, useEffect, useMemo, startTransition } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useMemo } from "react";
 import { useIntuneStore } from "../../stores/intune-store";
-import { analyzeIntuneLogs } from "../../lib/commands";
-import { getLogSourcePath, loadLogSource } from "../../lib/log-source";
+import { useAppActions } from "../layout/Toolbar";
 import { EventTimeline } from "./EventTimeline";
 import { DownloadStats } from "./DownloadStats";
 import type {
@@ -11,7 +9,6 @@ import type {
   IntuneEventType,
   IntuneStatus,
 } from "../../types/intune";
-import type { LogSource } from "../../types/log";
 
 type TabId = "timeline" | "downloads" | "summary";
 
@@ -22,21 +19,22 @@ const TAB_LABELS: Record<TabId, string> = {
 };
 
 export function IntuneDashboard() {
-  const [activeTab, setActiveTab] = useState<TabId>("timeline");
   const events = useIntuneStore((s) => s.events);
   const downloads = useIntuneStore((s) => s.downloads);
   const summary = useIntuneStore((s) => s.summary);
   const diagnostics = useIntuneStore((s) => s.diagnostics);
-  const sourceFile = useIntuneStore((s) => s.sourceFile);
-  const sourceFiles = useIntuneStore((s) => s.sourceFiles);
+  const sourceContext = useIntuneStore((s) => s.sourceContext);
+  const analysisState = useIntuneStore((s) => s.analysisState);
   const isAnalyzing = useIntuneStore((s) => s.isAnalyzing);
-  const resultRevision = useIntuneStore((s) => s.resultRevision);
-  const setResults = useIntuneStore((s) => s.setResults);
-  const setAnalyzing = useIntuneStore((s) => s.setAnalyzing);
+  const timelineScope = useIntuneStore((s) => s.timelineScope);
+  const activeTab = useIntuneStore((s) => s.activeTab);
+  const setActiveTab = useIntuneStore((s) => s.setActiveTab);
+  const clearTimelineFileScope = useIntuneStore((s) => s.clearTimelineFileScope);
   const filterEventType = useIntuneStore((s) => s.filterEventType);
   const filterStatus = useIntuneStore((s) => s.filterStatus);
   const setFilterEventType = useIntuneStore((s) => s.setFilterEventType);
   const setFilterStatus = useIntuneStore((s) => s.setFilterStatus);
+  const { commandState, openSourceFileDialog, openSourceFolderDialog } = useAppActions();
 
   const availableTabs = useMemo(
     () => ({
@@ -77,72 +75,20 @@ export function IntuneDashboard() {
       }
       setActiveTab("timeline");
     }
-  }, [activeTab, availableTabs]);
-
-  useEffect(() => {
-    if (resultRevision > 0) {
-      setActiveTab("timeline");
-    }
-  }, [resultRevision]);
-
-  const analyzeSource = useCallback(
-    async (source: LogSource) => {
-      setAnalyzing(true);
-      try {
-        await loadLogSource(source).catch((error) => {
-          console.warn("[intune] failed to sync log source", { source, error });
-        });
-
-        const result = await analyzeIntuneLogs(getLogSourcePath(source));
-        startTransition(() => {
-          setResults(
-            result.events,
-            result.downloads,
-            result.summary,
-            result.diagnostics,
-            result.sourceFile,
-            result.sourceFiles
-          );
-        });
-      } catch (err) {
-        console.error("Intune analysis failed:", err);
-      } finally {
-        setAnalyzing(false);
-      }
-    },
-    [setAnalyzing, setResults]
-  );
-
-  const handleAnalyzeFile = useCallback(async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [
-        { name: "IME Logs", extensions: ["log"] },
-        { name: "All Files", extensions: ["*"] },
-      ],
-    });
-
-    if (!selected || Array.isArray(selected)) {
-      return;
-    }
-
-    await analyzeSource({ kind: "file", path: selected });
-  }, [analyzeSource]);
-
-  const handleAnalyzeFolder = useCallback(async () => {
-    const selected = await open({
-      multiple: false,
-      directory: true,
-    });
-
-    if (!selected || Array.isArray(selected)) {
-      return;
-    }
-
-    await analyzeSource({ kind: "folder", path: selected });
-  }, [analyzeSource]);
+  }, [activeTab, availableTabs, setActiveTab]);
 
   const hasAnyResult = summary != null || events.length > 0 || downloads.length > 0;
+  const sourceFiles = sourceContext.includedFiles;
+  const sourceLabel = analysisState.requestedPath ?? sourceContext.analyzedPath;
+  const sourceStatusTone =
+    analysisState.phase === "error"
+      ? "#b91c1c"
+      : analysisState.phase === "empty"
+        ? "#b45309"
+        : analysisState.phase === "analyzing"
+          ? "#2563eb"
+          : "#6b7280";
+  const timelineScopeFileName = timelineScope.filePath ? getFileName(timelineScope.filePath) : null;
 
   return (
     <div
@@ -157,176 +103,176 @@ export function IntuneDashboard() {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: "8px",
-          padding: "8px 12px",
-          backgroundColor: "#f0f0f0",
-          borderBottom: "1px solid #c0c0c0",
+          justifyContent: "space-between",
+          padding: "6px 12px",
+          backgroundColor: "#f3f4f6",
+          borderBottom: "1px solid #d1d5db",
           flexShrink: 0,
         }}
       >
-        <span
-          style={{
-            fontSize: "14px",
-            fontWeight: "bold",
-            fontFamily: "'Segoe UI', Tahoma, sans-serif",
-          }}
-        >
-          Intune Diagnostics
-        </span>
-        <ActionButton
-          onClick={handleAnalyzeFile}
-          disabled={isAnalyzing}
-          label={isAnalyzing ? "Analyzing..." : "Open IME Log"}
-        />
-        <ActionButton
-          onClick={handleAnalyzeFolder}
-          disabled={isAnalyzing}
-          label={isAnalyzing ? "Analyzing..." : "Open IME Folder"}
-        />
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <span
+            style={{
+              fontSize: "13px",
+              fontWeight: 600,
+              color: "#1f2937",
+              fontFamily: "'Segoe UI', Tahoma, sans-serif",
+            }}
+          >
+            Intune Diagnostics Workspace
+          </span>
+          <div style={{ width: "1px", height: "16px", backgroundColor: "#cbd5e1" }} />
+          <ActionButton
+            onClick={() => {
+              void openSourceFileDialog();
+            }}
+            disabled={!commandState.canOpenSources}
+            label={isAnalyzing ? "Analyzing..." : "Open IME Log File..."}
+          />
+          <ActionButton
+            onClick={() => {
+              void openSourceFolderDialog();
+            }}
+            disabled={!commandState.canOpenSources}
+            label={isAnalyzing ? "Analyzing..." : "Open IME Log Folder..."}
+          />
 
-        {isAnalyzing && (
-          <span style={{ fontSize: "11px", color: "#1d4ed8" }}>Analyzing source…</span>
-        )}
+          {(analysisState.phase === "analyzing" || analysisState.phase === "error" || analysisState.phase === "empty") && (
+            <span style={{ fontSize: "12px", color: sourceStatusTone, fontWeight: 500, marginLeft: "4px" }}>
+              {analysisState.message}
+            </span>
+          )}
+        </div>
 
-        {sourceFile && (
+        {sourceLabel && (
           <div
             style={{
               display: "flex",
               flexDirection: "column",
               alignItems: "flex-end",
-              marginLeft: "auto",
               minWidth: 0,
-              maxWidth: "520px",
+              maxWidth: "400px",
             }}
           >
             <span
               style={{
                 fontSize: "11px",
-                color: "#374151",
+                color: "#4b5563",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
                 maxWidth: "100%",
+                fontWeight: 500,
               }}
-              title={sourceFile}
+              title={sourceLabel}
             >
-              {sourceFile}
+              {sourceLabel}
             </span>
-            {sourceFiles.length > 0 && (
-              <span
-                style={{
-                  fontSize: "10px",
-                  color: "#6b7280",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  maxWidth: "100%",
-                }}
-                title={sourceFiles.join("\n")}
-              >
-                Included files: {sourceFiles.length}
+            {(analysisState.detail || sourceFiles.length > 0) && (
+              <span style={{ fontSize: "10px", color: sourceStatusTone }}>
+                {analysisState.phase === "error"
+                  ? analysisState.detail
+                  : analysisState.phase === "empty"
+                    ? analysisState.detail
+                    : sourceFiles.length > 0
+                      ? `${sourceFiles.length} included files`
+                      : analysisState.detail}
               </span>
             )}
           </div>
         )}
       </div>
 
-      {summary && (
-        <div
-          style={{
-            display: "flex",
-            gap: "16px",
-            padding: "6px 12px",
-            backgroundColor: "#f8fafc",
-            borderBottom: "1px solid #e2e8f0",
-            fontSize: "12px",
-            flexWrap: "wrap",
-            flexShrink: 0,
-          }}
-        >
-          <SummaryBadge label="Events" value={summary.totalEvents} />
-          <SummaryBadge label="Win32" value={summary.win32Apps} color="#6366f1" />
-          <SummaryBadge label="WinGet" value={summary.wingetApps} color="#8b5cf6" />
-          <SummaryBadge label="Scripts" value={summary.scripts} color="#0ea5e9" />
-          <SummaryBadge label="Remed." value={summary.remediations} color="#14b8a6" />
-          <div style={{ width: "1px", backgroundColor: "#d1d5db" }} />
-          <SummaryBadge label="Succeeded" value={summary.succeeded} color="#22c55e" />
-          <SummaryBadge label="Failed" value={summary.failed} color="#ef4444" />
-          <SummaryBadge label="In Progress" value={summary.inProgress} color="#3b82f6" />
-          <SummaryBadge label="Pending" value={summary.pending} color="#64748b" />
-          <SummaryBadge label="Timed Out" value={summary.timedOut} color="#f59e0b" />
-          {summary.logTimeSpan && (
-            <>
-              <div style={{ width: "1px", backgroundColor: "#d1d5db" }} />
-              <span style={{ color: "#6b7280" }}>Span: {summary.logTimeSpan}</span>
-            </>
-          )}
-        </div>
-      )}
-
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          padding: "4px 12px",
-          gap: "4px",
+          padding: "0 12px",
+          backgroundColor: "#f8fafc",
           borderBottom: "1px solid #e2e8f0",
-          backgroundColor: "#fafafa",
+          minHeight: "40px",
           flexShrink: 0,
         }}
       >
-        {(Object.keys(TAB_LABELS) as TabId[]).map((tabId) => (
-          <TabButton
-            key={tabId}
-            label={TAB_LABELS[tabId]}
-            active={activeTab === tabId}
-            disabled={isAnalyzing || !availableTabs[tabId]}
-            count={tabId === "timeline" ? events.length : tabId === "downloads" ? downloads.length : summary ? 1 : 0}
-            onClick={() => setActiveTab(tabId)}
-          />
-        ))}
+        <div style={{ display: "flex", gap: "2px", alignItems: "center", height: "100%" }}>
+          {(Object.keys(TAB_LABELS) as TabId[]).map((tabId) => (
+            <CanvasTabButton
+              key={tabId}
+              label={TAB_LABELS[tabId]}
+              active={activeTab === tabId}
+              disabled={isAnalyzing || !availableTabs[tabId]}
+              count={tabId === "timeline" ? events.length : tabId === "downloads" ? downloads.length : summary ? 1 : 0}
+              onClick={() => setActiveTab(tabId)}
+            />
+          ))}
+        </div>
 
-        {activeTab === "timeline" && events.length > 0 && (
-          <>
+        {summary && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              marginLeft: "12px",
+              flex: 1,
+              overflow: "hidden",
+            }}
+          >
+            <div style={{ width: "1px", height: "20px", backgroundColor: "#cbd5e1", marginRight: "12px" }} />
             <div
               style={{
-                width: "1px",
-                height: "20px",
-                backgroundColor: "#d1d5db",
-                margin: "0 6px",
+                display: "flex",
+                gap: "10px",
+                flexWrap: "nowrap",
+                overflowX: "auto",
+                scrollbarWidth: "none",
+                alignItems: "center",
               }}
-            />
-            <label style={{ fontSize: "11px", color: "#666" }}>Type:</label>
+            >
+              <StrongBadge label="Total" value={summary.totalEvents} />
+              <StrongBadge label="Success" value={summary.succeeded} color="#16a34a" />
+              <StrongBadge label="Fail" value={summary.failed} color="#dc2626" />
+              <StrongBadge label="Prog" value={summary.inProgress} color="#2563eb" />
+              <StrongBadge label="Win32" value={summary.win32Apps} />
+              <StrongBadge label="WinGet" value={summary.wingetApps} />
+              {summary.logTimeSpan && (
+                <>
+                  <div style={{ width: "1px", height: "12px", backgroundColor: "#cbd5e1", margin: "0 4px" }} />
+                  <span style={{ fontSize: "11px", color: "#64748b", fontWeight: 500 }}>
+                    {summary.logTimeSpan}
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {activeTab === "timeline" && events.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: "6px", marginLeft: "auto", paddingLeft: "12px" }}>
+            <span style={{ fontSize: "10px", color: "#6b7280", fontWeight: 600, textTransform: "uppercase" }}>Filters:</span>
             <select
               value={filterEventType}
-              onChange={(e) =>
-                setFilterEventType(e.target.value as IntuneEventType | "All")
-              }
-              style={{ fontSize: "11px", padding: "1px 4px" }}
+              onChange={(e) => setFilterEventType(e.target.value as IntuneEventType | "All")}
+              style={selectStyle}
               disabled={isAnalyzing}
             >
-              <option value="All">All</option>
-              <option value="Win32App">Win32 App</option>
-              <option value="WinGetApp">WinGet App</option>
-              <option value="PowerShellScript">PowerShell Script</option>
+              <option value="All">All Types</option>
+              <option value="Win32App">Win32</option>
+              <option value="WinGetApp">WinGet</option>
+              <option value="PowerShellScript">Script</option>
               <option value="Remediation">Remediation</option>
               <option value="Esp">ESP</option>
-              <option value="SyncSession">Sync Session</option>
-              <option value="PolicyEvaluation">Policy Evaluation</option>
-              <option value="ContentDownload">Content Download</option>
+              <option value="SyncSession">Sync</option>
+              <option value="PolicyEvaluation">Policy</option>
+              <option value="ContentDownload">Download</option>
               <option value="Other">Other</option>
             </select>
-
-            <label style={{ fontSize: "11px", color: "#666" }}>Status:</label>
             <select
               value={filterStatus}
-              onChange={(e) =>
-                setFilterStatus(e.target.value as IntuneStatus | "All")
-              }
-              style={{ fontSize: "11px", padding: "1px 4px" }}
+              onChange={(e) => setFilterStatus(e.target.value as IntuneStatus | "All")}
+              style={selectStyle}
               disabled={isAnalyzing}
             >
-              <option value="All">All</option>
+              <option value="All">All Statuses</option>
               <option value="Success">Success</option>
               <option value="Failed">Failed</option>
               <option value="InProgress">In Progress</option>
@@ -334,7 +280,6 @@ export function IntuneDashboard() {
               <option value="Timeout">Timeout</option>
               <option value="Unknown">Unknown</option>
             </select>
-
             <button
               onClick={() => {
                 setFilterEventType("All");
@@ -342,27 +287,82 @@ export function IntuneDashboard() {
               }}
               disabled={!hasActiveFilters || isAnalyzing}
               style={{
-                marginLeft: "4px",
-                fontSize: "11px",
+                marginLeft: "2px",
+                fontSize: "10px",
                 padding: "2px 6px",
                 border: "1px solid #d1d5db",
-                borderRadius: "4px",
-                backgroundColor: hasActiveFilters ? "#ffffff" : "#f3f4f6",
+                borderRadius: "3px",
+                backgroundColor: hasActiveFilters ? "#fff" : "#f1f5f9",
+                color: hasActiveFilters ? "#1e293b" : "#94a3b8",
                 cursor: hasActiveFilters && !isAnalyzing ? "pointer" : "not-allowed",
               }}
             >
-              Reset Filters
+              Reset
             </button>
-
-            <span style={{ marginLeft: "6px", fontSize: "11px", color: "#6b7280" }}>
-              {filteredEventCount} / {events.length} events
+            <span style={{ fontSize: "11px", color: "#64748b", fontWeight: 500, marginLeft: "4px" }}>
+              {filteredEventCount}/{events.length}
             </span>
-          </>
+            {timelineScope.filePath && (
+              <>
+                <div style={{ width: "1px", height: "16px", backgroundColor: "#cbd5e1", margin: "0 2px" }} />
+                <span
+                  title={timelineScope.filePath}
+                  style={{
+                    maxWidth: "220px",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontSize: "11px",
+                    color: "#92400e",
+                    backgroundColor: "#fef3c7",
+                    border: "1px solid #fcd34d",
+                    borderRadius: "999px",
+                    padding: "3px 8px",
+                    fontWeight: 600,
+                  }}
+                >
+                  Timeline scoped to {timelineScopeFileName}
+                </span>
+                <button
+                  onClick={() => clearTimelineFileScope()}
+                  disabled={isAnalyzing}
+                  style={{
+                    fontSize: "10px",
+                    padding: "2px 6px",
+                    border: "1px solid #d1d5db",
+                    borderRadius: "3px",
+                    backgroundColor: "#fff",
+                    color: "#1e293b",
+                    cursor: isAnalyzing ? "not-allowed" : "pointer",
+                  }}
+                >
+                  Clear Scope
+                </button>
+              </>
+            )}
+          </div>
         )}
       </div>
 
-      <div style={{ flex: 1, overflow: "auto" }}>
-        {!hasAnyResult && !isAnalyzing ? (
+      <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }}>
+        {(analysisState.phase === "error" || analysisState.phase === "empty") && (
+          <div
+            role="alert"
+            style={{
+              margin: "12px 12px 0",
+              padding: "10px 12px",
+              border: analysisState.phase === "empty" ? "1px solid #fde68a" : "1px solid #fecaca",
+              backgroundColor: analysisState.phase === "empty" ? "#fffbeb" : "#fef2f2",
+              color: analysisState.phase === "empty" ? "#92400e" : "#991b1b",
+              fontSize: "12px",
+            }}
+          >
+            <div style={{ fontWeight: 600 }}>{analysisState.message}</div>
+            {analysisState.detail && <div style={{ marginTop: "4px" }}>{analysisState.detail}</div>}
+          </div>
+        )}
+
+        {!hasAnyResult && analysisState.phase !== "analyzing" && analysisState.phase !== "error" ? (
           <div
             style={{
               display: "flex",
@@ -373,7 +373,7 @@ export function IntuneDashboard() {
               fontSize: "14px",
             }}
           >
-            Open an IntuneManagementExtension.log file or folder to analyze
+            Open an Intune IME log file or folder to analyze
           </div>
         ) : isAnalyzing && !hasAnyResult ? (
           <div
@@ -386,7 +386,37 @@ export function IntuneDashboard() {
               fontSize: "14px",
             }}
           >
-            Running Intune analysis...
+            {analysisState.message}
+          </div>
+        ) : analysisState.phase === "empty" && !hasAnyResult ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              height: "100%",
+              color: "#92400e",
+              fontSize: "14px",
+              padding: "0 24px",
+              textAlign: "center",
+            }}
+          >
+            {analysisState.detail ?? "No IME log files were found in this folder."}
+          </div>
+        ) : analysisState.phase === "error" && !hasAnyResult ? (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              height: "100%",
+              color: "#991b1b",
+              fontSize: "14px",
+              padding: "0 24px",
+              textAlign: "center",
+            }}
+          >
+            {analysisState.detail ?? "The selected Intune source could not be analyzed."}
           </div>
         ) : (
           <>
@@ -396,8 +426,8 @@ export function IntuneDashboard() {
               <SummaryView
                 summary={summary}
                 diagnostics={diagnostics}
-                sourceFile={sourceFile}
-                sourceFiles={sourceFiles}
+                sourceFile={sourceContext.analyzedPath}
+                sourceFiles={sourceContext.includedFiles}
               />
             )}
           </>
@@ -435,24 +465,16 @@ function ActionButton({
   );
 }
 
-function SummaryBadge({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: number;
-  color?: string;
-}) {
-  return (
-    <span>
-      <span style={{ color: "#6b7280" }}>{label}: </span>
-      <span style={{ fontWeight: "bold", color: color || "#111" }}>{value}</span>
-    </span>
-  );
-}
+const selectStyle: React.CSSProperties = {
+  fontSize: "11px",
+  padding: "2px 6px",
+  borderRadius: "3px",
+  border: "1px solid #cbd5e1",
+  backgroundColor: "#fff",
+  outline: "none",
+};
 
-function TabButton({
+function CanvasTabButton({
   label,
   active,
   disabled,
@@ -470,19 +492,42 @@ function TabButton({
       onClick={onClick}
       disabled={disabled}
       style={{
-        fontSize: "12px",
-        padding: "3px 10px",
-        border: "1px solid #d1d5db",
-        borderBottom: active ? "2px solid #3b82f6" : "1px solid #d1d5db",
-        borderRadius: "3px 3px 0 0",
-        backgroundColor: active ? "#fff" : "#f3f4f6",
-        color: disabled ? "#9ca3af" : "#111827",
-        fontWeight: active ? 600 : 400,
+        fontSize: "11px",
+        padding: "6px 12px",
+        border: "none",
+        borderBottom: active ? "2px solid #2563eb" : "2px solid transparent",
+        backgroundColor: "transparent",
+        color: disabled ? "#94a3b8" : active ? "#1e3a8a" : "#475569",
+        fontWeight: active ? 600 : 500,
         cursor: disabled ? "not-allowed" : "pointer",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        gap: "6px",
+        transition: "all 0.1s ease",
       }}
     >
-      {label} ({count})
+      <span>{label}</span>
+      <span style={{
+        fontSize: "9px",
+        backgroundColor: active ? "#dbeafe" : "#f1f5f9",
+        color: active ? "#1d4ed8" : "#64748b",
+        padding: "2px 6px",
+        borderRadius: "99px",
+        fontWeight: 700,
+      }}>
+        {count}
+      </span>
     </button>
+  );
+}
+
+function StrongBadge({ label, value, color }: { label: string; value: number | string; color?: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "baseline", gap: "4px" }}>
+      <span style={{ color: "#64748b", fontSize: "10px", fontWeight: 600, textTransform: "uppercase" }}>{label}</span>
+      <span style={{ color: color || "#0f172a", fontSize: "12px", fontWeight: 700 }}>{value}</span>
+    </div>
   );
 }
 
@@ -522,7 +567,7 @@ function SummaryView({
           fontFamily: "'Segoe UI', Tahoma, sans-serif",
         }}
       >
-        Analysis Summary
+        Intune Diagnostics Summary
       </h3>
 
       {sourceFile && (
@@ -534,7 +579,7 @@ function SummaryView({
       {sourceFiles.length > 0 && (
         <div style={{ marginBottom: "12px", color: "#666" }}>
           <div style={{ marginBottom: "4px" }}>
-            <strong>Included Files:</strong> {sourceFiles.length}
+            <strong>Included IME Log Files:</strong> {sourceFiles.length}
           </div>
           <div
             style={{

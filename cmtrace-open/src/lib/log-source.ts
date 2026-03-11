@@ -28,6 +28,7 @@ export interface LoadLogSourceResult {
   selectedFilePath: string | null;
   parseResult: ParseResult | null;
 }
+
 const KNOWN_SOURCE_BY_PRESET_MENU_ID: Record<string, string> = {
   "preset.windows.ime": "windows-intune-ime-logs",
 };

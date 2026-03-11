@@ -31,11 +31,17 @@ interface EventTimelineProps {
 export function EventTimeline({ events }: EventTimelineProps) {
   const selectedEventId = useIntuneStore((s) => s.selectedEventId);
   const selectEvent = useIntuneStore((s) => s.selectEvent);
+  const timelineScope = useIntuneStore((s) => s.timelineScope);
+  const sourceFiles = useIntuneStore((s) => s.sourceFiles);
   const filterEventType = useIntuneStore((s) => s.filterEventType);
   const filterStatus = useIntuneStore((s) => s.filterStatus);
+  const showSourceFileLabel = sourceFiles.length > 1 && timelineScope.filePath == null;
 
   const filteredEvents = useMemo(() => {
     return events.filter((e) => {
+      if (timelineScope.filePath != null && e.sourceFile !== timelineScope.filePath) {
+        return false;
+      }
       if (filterEventType !== "All" && e.eventType !== filterEventType) {
         return false;
       }
@@ -44,7 +50,7 @@ export function EventTimeline({ events }: EventTimelineProps) {
       }
       return true;
     });
-  }, [events, filterEventType, filterStatus]);
+  }, [events, filterEventType, filterStatus, timelineScope.filePath]);
 
   useEffect(() => {
     if (selectedEventId == null) {
@@ -67,7 +73,7 @@ export function EventTimeline({ events }: EventTimelineProps) {
     count: filteredEvents.length,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) =>
-      filteredEvents[index]?.id === selectedEventId ? 168 : 72,
+      filteredEvents[index]?.id === selectedEventId ? 140 : 28,
     overscan: 10,
   });
 
@@ -79,7 +85,7 @@ export function EventTimeline({ events }: EventTimelineProps) {
 
   if (events.length === 0) {
     return (
-      <div style={{ padding: "20px", color: "#666", textAlign: "center" }}>
+      <div style={{ padding: "20px", color: "#666", textAlign: "center", fontSize: "12px" }}>
         No Intune timeline events were found in this analysis.
       </div>
     );
@@ -87,8 +93,11 @@ export function EventTimeline({ events }: EventTimelineProps) {
 
   if (filteredEvents.length === 0) {
     return (
-      <div style={{ padding: "20px", color: "#666", textAlign: "center" }}>
-        No events match the current filters.
+      <div style={{ padding: "20px", color: "#666", textAlign: "center", fontSize: "12px" }}>
+        {timelineScope.filePath
+          ? `No events from ${getFileName(timelineScope.filePath)} match the current timeline scope${filterEventType !== "All" || filterStatus !== "All" ? " and filters." : "."
+          }`
+          : "No events match the current filters."}
       </div>
     );
   }
@@ -99,7 +108,8 @@ export function EventTimeline({ events }: EventTimelineProps) {
       style={{
         overflowY: "auto",
         height: "100%",
-        padding: "8px 0",
+        padding: "0",
+        backgroundColor: "#ffffff",
       }}
     >
       <div
@@ -128,152 +138,145 @@ export function EventTimeline({ events }: EventTimelineProps) {
                 onClick={() => selectEvent(isSelected ? null : event.id)}
                 style={{
                   display: "flex",
-                  alignItems: "flex-start",
-                  padding: "6px 12px",
+                  flexDirection: isSelected ? "column" : "row",
+                  alignItems: isSelected ? "stretch" : "center",
+                  padding: isSelected ? "8px 12px" : "2px 12px",
                   cursor: "pointer",
-                  backgroundColor: isSelected ? "#e0e7ff" : "transparent",
-                  borderLeft: `3px solid ${STATUS_COLORS[event.status]}`,
-                  marginBottom: "2px",
+                  backgroundColor: isSelected ? "#eff6ff" : virtualRow.index % 2 === 0 ? "#ffffff" : "#fafafa",
+                  borderLeft: `4px solid ${STATUS_COLORS[event.status]}`,
+                  borderBottom: "1px solid #f1f5f9",
+                  height: "100%",
+                  boxSizing: "border-box",
                 }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "center",
-                    marginRight: "10px",
-                    minWidth: "20px",
-                  }}
-                >
-                  <div
-                    style={{
-                      width: "12px",
-                      height: "12px",
-                      borderRadius: "50%",
-                      backgroundColor: STATUS_COLORS[event.status],
-                      flexShrink: 0,
-                      marginTop: "3px",
-                    }}
-                  />
-                  {virtualRow.index < filteredEvents.length - 1 && (
-                    <div
-                      style={{
-                        width: "2px",
-                        flex: 1,
-                        minHeight: "20px",
-                        backgroundColor: "#d1d5db",
-                      }}
-                    />
-                  )}
-                </div>
+                {/* Header / Summary Line */}
+                <div style={{ display: "flex", alignItems: "center", width: "100%", minWidth: 0, gap: "10px" }}>
+                  <div style={{ fontSize: "11px", color: "#64748b", flexShrink: 0, width: "65px", fontFamily: "'Courier New', monospace" }}>
+                    {event.startTime ? event.startTime.split(" ")[1] || event.startTime : "--:--:--"}
+                  </div>
 
-                <div style={{ flex: 1, minWidth: 0 }}>
                   <div
                     style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: "6px",
-                      marginBottom: "2px",
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      padding: "2px 6px",
+                      borderRadius: "3px",
+                      backgroundColor: "#e2e8f0",
+                      color: "#475569",
+                      width: "55px",
+                      textAlign: "center",
+                      flexShrink: 0,
+                      textTransform: "uppercase",
                     }}
                   >
-                    <span
+                    {EVENT_TYPE_LABELS[event.eventType]}
+                  </div>
+
+                  <div
+                    style={{
+                      flex: 1,
+                      fontSize: "12px",
+                      fontWeight: isSelected ? 600 : 500,
+                      color: isSelected ? "#1e3a8a" : "#1e293b",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={event.name}
+                  >
+                    {event.name}
+                  </div>
+
+                  {event.errorCode && !isSelected && (
+                    <div style={{ fontSize: "11px", color: "#ef4444", fontFamily: "'Courier New', monospace", flexShrink: 0 }}>
+                      {event.errorCode}
+                    </div>
+                  )}
+
+                  {showSourceFileLabel && (
+                    <div
+                      title={event.sourceFile}
                       style={{
                         fontSize: "10px",
-                        fontWeight: "bold",
-                        padding: "1px 6px",
-                        borderRadius: "3px",
-                        backgroundColor: "#e5e7eb",
-                        color: "#374151",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {EVENT_TYPE_LABELS[event.eventType]}
-                    </span>
-                    <span
-                      style={{
-                        fontSize: "12px",
-                        fontWeight: 500,
+                        color: "#475569",
+                        backgroundColor: "#f1f5f9",
+                        border: "1px solid #e2e8f0",
+                        borderRadius: "999px",
+                        padding: "2px 6px",
+                        maxWidth: "130px",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
+                        flexShrink: 1,
                       }}
-                      title={event.name}
                     >
-                      {event.name}
-                    </span>
-                  </div>
+                      {getFileName(event.sourceFile)}
+                    </div>
+                  )}
+
+                  {event.durationSecs != null && (
+                    <div style={{ fontSize: "11px", color: "#94a3b8", width: "50px", textAlign: "right", flexShrink: 0 }}>
+                      {formatDuration(event.durationSecs)}
+                    </div>
+                  )}
 
                   <div
                     style={{
-                      display: "flex",
-                      gap: "8px",
-                      fontSize: "11px",
-                      color: "#6b7280",
+                      fontSize: "9px",
+                      fontWeight: 700,
+                      padding: "2px 6px",
+                      borderRadius: "3px",
+                      backgroundColor: STATUS_COLORS[event.status],
+                      color: "#fff",
+                      width: "65px",
+                      textAlign: "center",
+                      flexShrink: 0,
+                      textTransform: "uppercase",
                     }}
                   >
-                    {event.startTime && <span>{event.startTime}</span>}
-                    {event.durationSecs != null && (
-                      <span style={{ color: "#9ca3af" }}>
-                        ({formatDuration(event.durationSecs)})
-                      </span>
-                    )}
-                    {event.errorCode && (
-                      <span
+                    {event.status}
+                  </div>
+                </div>
+
+                {/* Expanded Details */}
+                {isSelected && (
+                  <div style={{ marginTop: "8px", display: "flex", gap: "12px" }}>
+                    <div style={{ flex: 1 }}>
+                      <div
                         style={{
-                          color: "#ef4444",
+                          fontSize: "11px",
+                          color: "#334155",
                           fontFamily: "'Courier New', monospace",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          maxHeight: "80px",
+                          overflow: "auto",
+                          backgroundColor: "#fff",
+                          border: "1px solid #cbd5e1",
+                          padding: "6px",
+                          borderRadius: "4px",
                         }}
                       >
-                        {event.errorCode}
-                      </span>
-                    )}
-                    <span
-                      style={{
-                        color: "#475569",
-                        fontFamily: "'Courier New', monospace",
-                      }}
-                      title={event.sourceFile}
-                    >
-                      {formatSourceLabel(event.sourceFile, event.lineNumber)}
-                    </span>
-                  </div>
-
-                  {isSelected && (
-                    <div
-                      style={{
-                        fontSize: "11px",
-                        color: "#4b5563",
-                        marginTop: "4px",
-                        fontFamily: "'Courier New', monospace",
-                        whiteSpace: "pre-wrap",
-                        wordBreak: "break-all",
-                        maxHeight: "120px",
-                        overflow: "auto",
-                        backgroundColor: "#f9fafb",
-                        padding: "4px 6px",
-                        borderRadius: "2px",
-                      }}
-                    >
-                      {event.detail}
+                        {event.detail}
+                      </div>
                     </div>
-                  )}
-                </div>
 
-                <div
-                  style={{
-                    fontSize: "10px",
-                    fontWeight: "bold",
-                    padding: "1px 6px",
-                    borderRadius: "3px",
-                    backgroundColor: STATUS_COLORS[event.status],
-                    color: "#fff",
-                    whiteSpace: "nowrap",
-                    marginLeft: "8px",
-                    marginTop: "2px",
-                  }}
-                >
-                  {event.status}
-                </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: "6px", width: "200px", flexShrink: 0, fontSize: "11px" }}>
+                      {event.startTime && (
+                        <div><strong style={{ color: "#64748b" }}>Start:</strong> {event.startTime}</div>
+                      )}
+                      {event.errorCode && (
+                        <div><strong style={{ color: "#64748b" }}>Error:</strong> <span style={{ color: "#ef4444", fontFamily: "'Courier New', monospace" }}>{event.errorCode}</span></div>
+                      )}
+                      <div>
+                        <strong style={{ color: "#64748b" }}>Source:</strong>
+                        <span style={{ fontFamily: "'Courier New', monospace", display: "block", color: "#475569" }} title={event.sourceFile}>
+                          {formatSourceLabel(event.sourceFile, event.lineNumber)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           );
@@ -284,10 +287,13 @@ export function EventTimeline({ events }: EventTimelineProps) {
 }
 
 function formatSourceLabel(sourceFile: string, lineNumber: number): string {
+  return `${getFileName(sourceFile)}:${lineNumber}`;
+}
+
+function getFileName(sourceFile: string): string {
   const normalized = sourceFile.replace(/\\/g, "/");
   const segments = normalized.split("/");
-  const fileName = segments[segments.length - 1] || sourceFile;
-  return `${fileName}:${lineNumber}`;
+  return segments[segments.length - 1] || sourceFile;
 }
 
 function formatDuration(secs: number): string {

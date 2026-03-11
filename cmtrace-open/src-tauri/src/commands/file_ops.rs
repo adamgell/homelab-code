@@ -281,8 +281,8 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
     vec![
         windows_known_source(
             "windows-intune-ime-logs",
-            "Intune Management Extension Logs",
-            "Primary Intune Win32 app and script diagnostics folder.",
+            "Intune IME Logs Folder",
+            "Known log source for Intune Management Extension (IME) app and script diagnostics.",
             KnownSourcePathKind::Folder,
             "C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs",
             &[
@@ -297,7 +297,7 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
                 family_id: "windows-intune".to_string(),
                 family_label: "Windows Intune".to_string(),
                 group_id: "intune-ime".to_string(),
-                group_label: "Intune Management Extension".to_string(),
+                group_label: "Intune IME".to_string(),
                 group_order: 10,
                 source_order: 10,
             },
@@ -315,7 +315,7 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
         ),
         windows_known_source(
             "windows-intune-ime-intunemanagementextension-log",
-            "Intune Management Extension: IntuneManagementExtension.log",
+            "Intune IME: IntuneManagementExtension.log",
             "Primary IME log for check-ins, policy processing, and app orchestration.",
             KnownSourcePathKind::File,
             "C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\\IntuneManagementExtension.log",
@@ -324,7 +324,7 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
                 family_id: "windows-intune".to_string(),
                 family_label: "Windows Intune".to_string(),
                 group_id: "intune-ime".to_string(),
-                group_label: "Intune Management Extension".to_string(),
+                group_label: "Intune IME".to_string(),
                 group_order: 10,
                 source_order: 20,
             },
@@ -332,7 +332,7 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
         ),
         windows_known_source(
             "windows-intune-ime-appworkload-log",
-            "Intune Management Extension: AppWorkload.log",
+            "Intune IME: AppWorkload.log",
             "Win32 and WinGet app download/staging/install diagnostics.",
             KnownSourcePathKind::File,
             "C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\\AppWorkload.log",
@@ -341,7 +341,7 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
                 family_id: "windows-intune".to_string(),
                 family_label: "Windows Intune".to_string(),
                 group_id: "intune-ime".to_string(),
-                group_label: "Intune Management Extension".to_string(),
+                group_label: "Intune IME".to_string(),
                 group_order: 10,
                 source_order: 30,
             },
@@ -349,7 +349,7 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
         ),
         windows_known_source(
             "windows-intune-ime-agentexecutor-log",
-            "Intune Management Extension: AgentExecutor.log",
+            "Intune IME: AgentExecutor.log",
             "Script execution and remediation output with exit code tracking.",
             KnownSourcePathKind::File,
             "C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs\\AgentExecutor.log",
@@ -358,7 +358,7 @@ fn windows_known_log_sources() -> Vec<KnownSourceMetadata> {
                 family_id: "windows-intune".to_string(),
                 family_label: "Windows Intune".to_string(),
                 group_id: "intune-ime".to_string(),
-                group_label: "Intune Management Extension".to_string(),
+                group_label: "Intune IME".to_string(),
                 group_order: 10,
                 source_order: 40,
             },

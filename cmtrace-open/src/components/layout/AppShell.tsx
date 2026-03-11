@@ -169,25 +169,25 @@ export function AppShell() {
     >
       <Toolbar />
 
-      {activeView === "log" ? (
-        <>
-          <div
-            style={{
-              flex: 1,
-              display: "flex",
-              overflow: "hidden",
-            }}
-          >
-            <FileSidebar width={FILE_SIDEBAR_RECOMMENDED_WIDTH} />
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          overflow: "hidden",
+        }}
+      >
+        <FileSidebar width={FILE_SIDEBAR_RECOMMENDED_WIDTH} activeView={activeView} />
 
-            <div
-              style={{
-                flex: 1,
-                display: "flex",
-                flexDirection: "column",
-                overflow: "hidden",
-              }}
-            >
+        <div
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
+          }}
+        >
+          {activeView === "log" ? (
+            <>
               <div
                 style={{
                   flex: 1,
@@ -208,16 +208,16 @@ export function AppShell() {
                   <InfoPane />
                 </div>
               )}
+            </>
+          ) : (
+            <div style={{ flex: 1, overflow: "hidden" }}>
+              <IntuneDashboard />
             </div>
-          </div>
-
-          <StatusBar />
-        </>
-      ) : (
-        <div style={{ flex: 1, overflow: "hidden" }}>
-          <IntuneDashboard />
+          )}
         </div>
-      )}
+      </div>
+
+      <StatusBar />
 
       {/* Dialogs */}
       <FindDialog

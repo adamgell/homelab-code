@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { loadLogSource, loadSelectedLogFile } from "../../lib/log-source";
 import { useFilterStore } from "../../stores/filter-store";
+import { useIntuneStore } from "../../stores/intune-store";
 import {
   getActiveSourceLabel,
   getActiveSourcePath,
@@ -14,6 +15,7 @@ export const FILE_SIDEBAR_RECOMMENDED_WIDTH = 280;
 
 interface FileSidebarProps {
   width?: number | string;
+  activeView: "log" | "intune";
 }
 
 function isFolderLikeSource(source: LogSource | null): boolean {
@@ -322,7 +324,7 @@ function FileRow({
   );
 }
 
-export function FileSidebar({ width = FILE_SIDEBAR_RECOMMENDED_WIDTH }: FileSidebarProps) {
+export function FileSidebar({ width = FILE_SIDEBAR_RECOMMENDED_WIDTH, activeView }: FileSidebarProps) {
   const activeSource = useLogStore((s) => s.activeSource);
   const sourceEntries = useLogStore((s) => s.sourceEntries);
   const selectedSourceFilePath = useLogStore((s) => s.selectedSourceFilePath);
@@ -331,6 +333,13 @@ export function FileSidebar({ width = FILE_SIDEBAR_RECOMMENDED_WIDTH }: FileSide
   const knownSources = useLogStore((s) => s.knownSources);
   const sourceStatus = useLogStore((s) => s.sourceStatus);
   const clearFilter = useFilterStore((s) => s.clearFilter);
+
+  const intuneAnalysisState = useIntuneStore((s) => s.analysisState);
+  const intuneIsAnalyzing = useIntuneStore((s) => s.isAnalyzing);
+  const intuneSummary = useIntuneStore((s) => s.summary);
+  const intuneSourceContext = useIntuneStore((s) => s.sourceContext);
+  const intuneTimelineScope = useIntuneStore((s) => s.timelineScope);
+  const setIntuneTimelineFileScope = useIntuneStore((s) => s.setTimelineFileScope);
 
   const [pendingPath, setPendingPath] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -446,6 +455,11 @@ export function FileSidebar({ width = FILE_SIDEBAR_RECOMMENDED_WIDTH }: FileSide
 
     return [formatCount(files.length, "file"), formatCount(folders.length, "folder")].join(" • ");
   }, [activeSource, files.length, folderLike, folders.length]);
+
+  const intuneIncludedFiles = intuneSourceContext.includedFiles;
+  const intuneSelectedFilePath = intuneTimelineScope.filePath;
+  const intuneRequestedPath = intuneAnalysisState.requestedPath;
+  const hasIntuneResults = intuneSummary != null || intuneIncludedFiles.length > 0;
 
   return (
     <aside
@@ -628,129 +642,300 @@ export function FileSidebar({ width = FILE_SIDEBAR_RECOMMENDED_WIDTH }: FileSide
       )}
 
       <div style={{ flex: 1, overflow: "auto" }}>
-        {!activeSource && (
-          <EmptyState
-            title="No file source open"
-            body="Open a file for the classic single-log workflow, or open a folder to browse files here."
-          />
-        )}
-
-        {activeSource && !folderLike && (
+        {activeView === "intune" && (
           <>
-            <SectionHeader title="Current file" caption="Classic single-file workflow" />
+            <SectionHeader title="Intune Diagnostics" caption={intuneAnalysisState.message} />
             <div
               style={{
                 padding: "12px 10px",
                 fontFamily: "'Segoe UI', Tahoma, sans-serif",
                 borderBottom: "1px solid #eef2f7",
+                fontSize: "12px",
+                color: "#374151",
               }}
             >
-              <div
-                style={{
-                  fontSize: "12px",
-                  fontWeight: 600,
-                  color: "#111827",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}
-                title={getBaseName(activeFilePath)}
-              >
-                {getBaseName(activeFilePath) || "No file selected"}
+              <div style={{ marginBottom: "6px" }}>
+                <span style={{ fontWeight: 600 }}>Requested source:</span>{" "}
+                <span title={intuneRequestedPath ?? undefined}>
+                  {intuneRequestedPath ?? "No analysis requested"}
+                </span>
               </div>
-              <div
-                style={{
-                  marginTop: "4px",
-                  fontSize: "11px",
-                  color: "#6b7280",
-                  lineHeight: 1.45,
-                  wordBreak: "break-word",
-                }}
-                title={sourcePath ?? undefined}
-              >
-                {sourcePath ?? "Use Open to choose a log file."}
+              <div style={{ marginBottom: "6px" }}>
+                <span style={{ fontWeight: 600 }}>Analyzed file:</span>{" "}
+                <span title={intuneSourceContext.analyzedPath ?? undefined}>
+                  {intuneSourceContext.analyzedPath ?? "Pending analysis"}
+                </span>
+              </div>
+              <div>
+                <span style={{ fontWeight: 600 }}>Timeline scope:</span>{" "}
+                <span title={intuneSelectedFilePath ?? undefined}>
+                  {getBaseName(intuneSelectedFilePath) || "All included files"}
+                </span>
               </div>
             </div>
-            <EmptyState
-              title="Sidebar stays compact for single files"
-              body="When a folder source is open, this area becomes a file picker so switching between sibling logs feels immediate."
-            />
+
+            {(intuneAnalysisState.phase === "analyzing" ||
+              intuneAnalysisState.phase === "error" ||
+              intuneAnalysisState.phase === "empty") && (
+                <SourceStatusNotice
+                  kind={
+                    intuneAnalysisState.phase === "error"
+                      ? "error"
+                      : intuneAnalysisState.phase === "empty"
+                        ? "empty"
+                        : "info"
+                  }
+                  message={intuneAnalysisState.message}
+                  detail={intuneAnalysisState.detail ?? undefined}
+                />
+              )}
+
+            {!hasIntuneResults && !intuneIsAnalyzing && intuneAnalysisState.phase !== "error" && (
+              <EmptyState
+                title="No Intune diagnostics data"
+                body="Select an Intune Management Extension (IME) log source to begin analysis."
+              />
+            )}
+
+            {intuneIsAnalyzing && (
+              <EmptyState
+                title="Analyzing Intune logs"
+                body="Scanning source files for events, downloads, and metrics..."
+              />
+            )}
+
+            {!hasIntuneResults && intuneAnalysisState.phase === "empty" && (
+              <EmptyState
+                title="No IME logs found"
+                body={
+                  intuneAnalysisState.detail ??
+                  "Choose a folder that contains Intune IME log files such as IntuneManagementExtension.log."
+                }
+              />
+            )}
+
+            {!hasIntuneResults && intuneAnalysisState.phase === "error" && (
+              <EmptyState
+                title="Intune diagnostics failed"
+                body={intuneAnalysisState.detail ?? "The selected Intune source could not be analyzed."}
+              />
+            )}
+
+            {intuneSummary && (
+              <>
+                <SectionHeader title="Diagnostics Summary" caption="Overview of the current Intune diagnostics data" />
+                <div
+                  style={{
+                    padding: "12px 10px",
+                    fontFamily: "'Segoe UI', Tahoma, sans-serif",
+                    borderBottom: "1px solid #eef2f7",
+                    fontSize: "12px",
+                    color: "#374151"
+                  }}
+                >
+                  <div style={{ marginBottom: "6px" }}>
+                    <span style={{ fontWeight: 600 }}>Total Events:</span> {intuneSummary.totalEvents}
+                  </div>
+                  <div style={{ marginBottom: "6px" }}>
+                    <span style={{ fontWeight: 600 }}>Downloads:</span> {intuneSummary.totalDownloads}
+                  </div>
+                  {intuneSummary.logTimeSpan && (
+                    <div style={{ marginBottom: "6px" }}>
+                      <span style={{ fontWeight: 600 }}>Time Span:</span> {intuneSummary.logTimeSpan}
+                    </div>
+                  )}
+                </div>
+
+                {intuneIncludedFiles.length > 0 && (
+                  <>
+                    <SectionHeader
+                      title={`Included IME Log Files (${intuneIncludedFiles.length})`}
+                      caption="Click a file to scope the timeline to that log only"
+                    />
+                    <div>
+                      {intuneIncludedFiles.map((path) => {
+                        const isSelected = intuneSelectedFilePath === path;
+
+                        return (
+                          <button
+                            key={path}
+                            type="button"
+                            onClick={() => setIntuneTimelineFileScope(isSelected ? null : path)}
+                            aria-pressed={isSelected}
+                            title={path}
+                            style={{
+                              width: "100%",
+                              textAlign: "left",
+                              padding: "6px 10px",
+                              border: "none",
+                              borderLeft: isSelected ? "3px solid #3b82f6" : "3px solid transparent",
+                              borderBottom: "1px solid #eef2f7",
+                              fontFamily: "'Segoe UI', Tahoma, sans-serif",
+                              fontSize: "11px",
+                              color: isSelected ? "#1d4ed8" : "#4b5563",
+                              backgroundColor: isSelected ? "#eff6ff" : "#ffffff",
+                              cursor: "pointer",
+                            }}
+                          >
+                            <div
+                              style={{
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                fontWeight: isSelected ? 600 : 400,
+                              }}
+                            >
+                              {getBaseName(path)}
+                            </div>
+                            <div
+                              style={{
+                                marginTop: "2px",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                                color: isSelected ? "#2563eb" : "#6b7280",
+                              }}
+                            >
+                              {isSelected ? "Timeline scope active" : path}
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
           </>
         )}
 
-        {activeSource && folderLike && sourceEntries.length === 0 && isLoading && (
-          <EmptyState title="Loading files" body="Reading the selected folder and preparing the file list." />
-        )}
-
-        {activeSource &&
-          folderLike &&
-          sourceEntries.length === 0 &&
-          !isLoading &&
-          sourceStatus.kind !== "missing" &&
-          sourceStatus.kind !== "error" && (
-            <EmptyState
-              title="This folder is empty"
-              body="No files were found in the selected folder. Choose another folder or reopen with a different source."
-            />
-          )}
-
-        {activeSource &&
-          folderLike &&
-          sourceEntries.length === 0 &&
-          !isLoading &&
-          (sourceStatus.kind === "missing" || sourceStatus.kind === "error") && (
-            <EmptyState
-              title="Source path unavailable"
-              body={sourceStatus.detail ?? "The selected source path could not be read."}
-            />
-          )}
-
-        {activeSource && folderLike && sourceEntries.length > 0 && (
+        {activeView === "log" && (
           <>
-            {folders.length > 0 && (
-              <div>
-                <SectionHeader
-                  title={`Folders (${folders.length})`}
-                  caption="Shown for context; nested browsing can be added later."
-                />
-                {folders.map((entry) => (
-                  <ContextRow key={entry.path} entry={entry} />
-                ))}
-              </div>
+            {!activeSource && (
+              <EmptyState
+                title="No file source open"
+                body="Open a file for the classic single-log workflow, or open a folder to browse files here."
+              />
             )}
 
-            <div>
-              <SectionHeader
-                title={`Files (${files.length})`}
-                caption={
-                  activeFilePath
-                    ? "Select a file to replace the active log view."
-                    : "Select a file to begin tailing and viewing log entries."
-                }
-              />
-              {files.length === 0 ? (
+            {activeSource && !folderLike && (
+              <>
+                <SectionHeader title="Current file" caption="Classic single-file workflow" />
+                <div
+                  style={{
+                    padding: "12px 10px",
+                    fontFamily: "'Segoe UI', Tahoma, sans-serif",
+                    borderBottom: "1px solid #eef2f7",
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: "12px",
+                      fontWeight: 600,
+                      color: "#111827",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                    }}
+                    title={getBaseName(activeFilePath)}
+                  >
+                    {getBaseName(activeFilePath) || "No file selected"}
+                  </div>
+                  <div
+                    style={{
+                      marginTop: "4px",
+                      fontSize: "11px",
+                      color: "#6b7280",
+                      lineHeight: 1.45,
+                      wordBreak: "break-word",
+                    }}
+                    title={sourcePath ?? undefined}
+                  >
+                    {sourcePath ?? "Use Open to choose a log file."}
+                  </div>
+                </div>
                 <EmptyState
-                  title="No files available"
-                  body="This source only returned folders. Open one of those folders directly when nested navigation is added."
+                  title="Sidebar stays compact for single files"
+                  body="When a folder source is open, this area becomes a file picker so switching between sibling logs feels immediate."
                 />
-              ) : (
-                files.map((entry) => (
-                  <FileRow
-                    key={entry.path}
-                    entry={entry}
-                    isSelected={entry.path === activeFilePath}
-                    isPending={entry.path === pendingPath}
-                    disabled={Boolean(pendingPath)}
-                    onSelect={handleSelectFile}
-                  />
-                ))
+              </>
+            )}
+
+            {activeSource && folderLike && sourceEntries.length === 0 && isLoading && (
+              <EmptyState title="Loading files" body="Reading the selected folder and preparing the file list." />
+            )}
+
+            {activeSource &&
+              folderLike &&
+              sourceEntries.length === 0 &&
+              !isLoading &&
+              sourceStatus.kind !== "missing" &&
+              sourceStatus.kind !== "error" && (
+                <EmptyState
+                  title="This folder is empty"
+                  body="No files were found in the selected folder. Choose another folder or reopen with a different source."
+                />
               )}
-            </div>
+
+            {activeSource &&
+              folderLike &&
+              sourceEntries.length === 0 &&
+              !isLoading &&
+              (sourceStatus.kind === "missing" || sourceStatus.kind === "error") && (
+                <EmptyState
+                  title="Source path unavailable"
+                  body={sourceStatus.detail ?? "The selected source path could not be read."}
+                />
+              )}
+
+            {activeSource && folderLike && sourceEntries.length > 0 && (
+              <>
+                {folders.length > 0 && (
+                  <div>
+                    <SectionHeader
+                      title={`Folders (${folders.length})`}
+                      caption="Shown for context; nested browsing can be added later."
+                    />
+                    {folders.map((entry) => (
+                      <ContextRow key={entry.path} entry={entry} />
+                    ))}
+                  </div>
+                )}
+
+                <div>
+                  <SectionHeader
+                    title={`Files (${files.length})`}
+                    caption={
+                      activeFilePath
+                        ? "Select a file to replace the active log view."
+                        : "Select a file to begin tailing and viewing log entries."
+                    }
+                  />
+                  {files.length === 0 ? (
+                    <EmptyState
+                      title="No files available"
+                      body="This source only returned folders. Open one of those folders directly when nested navigation is added."
+                    />
+                  ) : (
+                    files.map((entry) => (
+                      <FileRow
+                        key={entry.path}
+                        entry={entry}
+                        isSelected={entry.path === activeFilePath}
+                        isPending={entry.path === pendingPath}
+                        disabled={Boolean(pendingPath)}
+                        onSelect={handleSelectFile}
+                      />
+                    ))
+                  )}
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
 
-      {activeSource && folderLike && !activeFilePath && !isLoading && (
+      {activeView === "log" && activeSource && folderLike && !activeFilePath && !isLoading && (
         <div
           style={{
             padding: "8px 10px",

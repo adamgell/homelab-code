@@ -106,13 +106,13 @@ fn build_known_sources_submenu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<
         let windows_ime = MenuItem::with_id(
             app,
             MENU_ID_PRESET_WINDOWS_IME,
-            "Windows IME Logs",
+            "Windows Intune IME Logs",
             true,
             None::<&str>,
         )?;
 
         let windows_sources = Submenu::with_items(app, "Windows", true, &[&windows_ime])?;
-        return Submenu::with_items(app, "Known Sources", true, &[&windows_sources]);
+        return Submenu::with_items(app, "Known Log Sources", true, &[&windows_sources]);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -125,7 +125,7 @@ fn build_known_sources_submenu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<
             None::<&str>,
         )?;
 
-        Submenu::with_items(app, "Known Sources", true, &[&placeholder])
+        Submenu::with_items(app, "Known Log Sources", true, &[&placeholder])
     }
 }
 

@@ -171,10 +171,40 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
     })
 }
 
+fn describe_path_access_error(path: &Path, error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::NotFound => {
+            format!("The selected Intune source was not found: '{}'", path.display())
+        }
+        std::io::ErrorKind::PermissionDenied => format!(
+            "The selected Intune source could not be accessed because permission was denied: '{}'",
+            path.display()
+        ),
+        _ => format!(
+            "The selected Intune source could not be accessed: '{}' ({})",
+            path.display(),
+            error
+        ),
+    }
+}
+
+fn describe_directory_read_error(path: &Path, error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied => format!(
+            "The selected Intune folder could not be read because permission was denied: '{}'",
+            path.display()
+        ),
+        _ => format!(
+            "The selected Intune folder could not be read: '{}' ({})",
+            path.display(),
+            error
+        ),
+    }
+}
+
 /// Resolve a single file or a directory of Intune logs into a deterministic file list.
 fn collect_input_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
-    let metadata = fs::metadata(path)
-        .map_err(|e| format!("Failed to access path '{}': {}", path.display(), e))?;
+    let metadata = fs::metadata(path).map_err(|error| describe_path_access_error(path, &error))?;
 
     if metadata.is_file() {
         return Ok(vec![path.to_path_buf()]);
@@ -182,13 +212,12 @@ fn collect_input_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
 
     if !metadata.is_dir() {
         return Err(format!(
-            "Path '{}' is neither a file nor a directory",
+            "The selected Intune source is neither a file nor a folder: '{}'",
             path.display()
         ));
     }
 
-    let entries = fs::read_dir(path)
-        .map_err(|e| format!("Failed to read directory '{}': {}", path.display(), e))?;
+    let entries = fs::read_dir(path).map_err(|error| describe_directory_read_error(path, &error))?;
 
     let mut files: Vec<PathBuf> = entries
         .filter_map(|entry| entry.ok())
@@ -214,7 +243,7 @@ fn collect_input_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
 
     if ime_files.is_empty() {
         return Err(format!(
-            "No .log files found in directory '{}'",
+            "The selected folder does not contain any .log files to analyze: '{}'",
             path.display()
         ));
     }

@@ -3,7 +3,6 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useLogStore } from "../stores/log-store";
 import { useUiStore } from "../stores/ui-store";
 import { useFilterStore } from "../stores/filter-store";
-import { refreshCurrentLogSource } from "../lib/log-source";
 import { useAppActions } from "../components/layout/Toolbar";
 
 function isTypingTarget(target: EventTarget | null): boolean {
@@ -111,11 +110,12 @@ export function useKeyboard() {
   );
   const showAboutDialogOpen = useUiStore((state) => state.showAboutDialog);
   const {
-    openLogFileDialog,
+    openSourceFileDialog,
     showFindDialog,
     showFilterDialog,
     showErrorLookupDialog,
     togglePauseResume,
+    refreshActiveSource,
     toggleDetailsPane,
     dismissTransientDialogs,
   } = useAppActions();
@@ -132,7 +132,7 @@ export function useKeyboard() {
 
       if (ctrl && event.key.toLowerCase() === "o") {
         event.preventDefault();
-        await openLogFileDialog();
+        await openSourceFileDialog();
         return;
       }
 
@@ -193,7 +193,7 @@ export function useKeyboard() {
         event.preventDefault();
 
         try {
-          await refreshCurrentLogSource("keyboard.f5");
+          await refreshActiveSource();
         } catch (error) {
           console.error("[keyboard] refresh failed", { error });
         }
@@ -252,7 +252,8 @@ export function useKeyboard() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
     dismissTransientDialogs,
-    openLogFileDialog,
+    openSourceFileDialog,
+    refreshActiveSource,
     showAboutDialogOpen,
     showErrorLookupDialog,
     showErrorLookupDialogOpen,
