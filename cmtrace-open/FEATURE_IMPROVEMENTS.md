@@ -3,25 +3,79 @@
 Internal planning document focused on unfinished work. Active priorities stay near the top; shipped work is summarized at the bottom for reference.
 
 **Status key**: Active Focus = current priority, Next Slice = recommended near-term implementation, Completed = shipped unless a regression is found  
-**Priority key**: P0 = critical path, P1 = high value, P2 = useful follow-on, P3 = future consideration  was that JPsadfsadasdasdsadsdasda
+**Priority key**: P0 = critical path, P1 = high value, P2 = useful follow-on, P3 = future consideration  
 **Effort key**: S = small (< 4 hours), M = medium (4–16 hours), L = large (16–40 hours), XL = 40+ hours
 
 ## Active Focus
 
-The current gap is Intune diagnostics depth, not source selection or baseline UI plumbing. The highest-value work is sample-driven refinement of Intune evidence rules and remediation guidance, especially for sidecar-driven app, applicability, and remediation failures.
+The current focus is sample-driven hardening and broader evidence-bundle intake. Intune diagnostics is good enough for now as a first-pass workflow, so the next work should prioritize better sample intake, evidence inventory, parser hardening from real samples, registry state capture, and curated adjacent evidence sources.
 
 ## Recommended Next Implementation Slice
 
-1. Expand Intune evidence rules with real failing samples from `AppWorkload.log`, `AppActionProcessor.log`, `AgentExecutor.log`, and `HealthScripts.log`.
-2. Increase remediation guidance only where the evidence stays deterministic, reviewable, and specific enough to trust.
-3. Improve diagnostics coverage stats so users can tell whether the available logs are sufficient before drawing conclusions.
-4. Keep parser expansion behind this work unless new samples stop yielding meaningful Intune diagnostic gains.
+1. Add a practical sample-intake flow that records what evidence was provided, what was recognized, and what is still unknown or unsupported.
+2. Build an evidence inventory so each local investigation starts with coverage and provenance instead of assumptions.
+3. Harden existing parsers and Intune evidence rules from real samples before expanding speculative source coverage.
+4. Treat registry snapshots and curated event-log exports as first-class adjacent evidence sources for live-device investigations.
+
+---
+
+## Prioritized Backlog: Next Implementation Slices
+
+### 0.1 Sample Intake Baseline — P0 / M
+
+**Expected outcome**: a dropped local evidence bundle produces a stable intake summary showing recognized artifacts, unsupported artifacts, parse status, and obvious evidence gaps.
+
+- Accept a local investigation folder as a mixed evidence bundle, not just a log directory.
+- Classify inputs into logs, registry exports, event-log exports, and unknown artifacts.
+- Show recognized source families, parse success/failure, and any high-value missing evidence.
+- Preserve deterministic ordering so intake results are easy to compare across runs and samples.
+
+### 0.2 Evidence Inventory and Provenance — P0 / M
+
+**Expected outcome**: each diagnostic summary can answer which artifacts were included, which were ignored, and which file or snapshot produced each notable event.
+
+- Add an evidence inventory view with source type, origin path, time coverage, and parse status.
+- Surface provenance throughout summaries and timelines instead of collapsing everything into a single implied source.
+- Make it obvious when conclusions are based on partial evidence or a narrow subset of the supplied bundle.
+
+### 0.3 Parser Hardening from Real Samples — P1 / M
+
+**Expected outcome**: existing Windows and IME parsers fail less often on real samples and produce fewer generic or misclassified events.
+
+- Use real investigation samples to tighten detection, multiline handling, timestamp parsing, and severity mapping.
+- Prioritize the parsers that already unlock common device investigations before adding niche formats.
+- Track unsupported line patterns and unknown source families so hardening work stays sample-led.
+
+### 0.4 Registry Snapshot Support — P1 / L
+
+**Expected outcome**: registry evidence is ingested as structured device state that can be queried, compared, and correlated with log timelines.
+
+- Treat registry data as state snapshots, not as another line-log parser.
+- Start with exported `.reg` and other practical snapshot inputs that show enrollment, policy, and app-management state.
+- Normalize keys, values, and hives so policy, enrollment, and health views can reference them directly.
+- Support side-by-side comparison of intended state, effective state, and observed failures where that evidence exists.
+
+### 0.5 Curated Event Log Intake — P1 / M
+
+**Expected outcome**: adjacent event evidence can be added to a local investigation in a focused way without requiring a full generic event viewer first.
+
+- Start with curated channels relevant to MDM, Autopilot, enrollment, BitLocker, LAPS, and Defender.
+- Prefer practical intake paths such as saved exports or offline investigation artifacts before expanding to a broad live-channel browser.
+- Correlate event IDs, levels, and timestamps back into the shared evidence inventory and timelines.
+
+### 0.6 Intune Rule Maintenance from New Samples — P2 / S
+
+**Expected outcome**: current Intune diagnostics stays useful without becoming the primary feature track.
+
+- Keep refining IME rules only when new samples expose repeatable gaps.
+- Expand remediation guidance only where evidence remains deterministic and reviewable.
+- Avoid large new Intune-only UI work unless it directly supports the broader evidence-bundle intake flow.
 
 ---
 
 ## 1. Parser Expansion
 
-Current state: core CMTrace, simple, plain text, and timestamped parsing are in place. Additional Windows log families remain useful, but they are not the current top slice.
+Current state: core CMTrace, simple, plain text, and timestamped parsing are in place. Additional Windows log families remain useful, but parser work should now be driven by real evidence intake and evidence gaps rather than format coverage for its own sake.
 
 ### 1.1 CBS/Panther Format Family — P1 / M
 
@@ -172,11 +226,11 @@ Extend `parser/detect.rs` in roughly this priority order:
 
 ## 2. Intune Diagnostics
 
-Current state: folder-based IME analysis, source provenance, sidecar-aware event extraction, timeline attribution, deterministic counters, issue clustering, and first-pass suggested fixes are already in place. Remaining work is about deeper evidence quality and broader data sources.
+Current state: folder-based IME analysis, source provenance, sidecar-aware event extraction, timeline attribution, deterministic counters, issue clustering, and first-pass suggested fixes are already in place. This area is good enough for now; remaining work should be sample-driven maintenance plus correlation with broader device evidence.
 
-### 2.1 IME Sidecar Heuristic Depth — P0 / M
+### 2.1 IME Rule Hardening from Real Samples — P1 / M
 
-The core sidecar set is already ingested. The remaining gap is richer extraction and stronger evidence quality from the highest-value files in `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\`.
+The core sidecar set is already ingested. The remaining gap is richer extraction and stronger evidence quality from the highest-value files in `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\`, but that work should stay behind real sample demand instead of driving the roadmap on its own.
 
 | Log File | Diagnostic Value | Remaining Gap |
 | --- | --- | --- |
@@ -197,7 +251,7 @@ The core sidecar set is already ingested. The remaining gap is richer extraction
 - Bias toward explicit rule coverage for retries, stalled content, applicability rejection, timeout loops, and recurring remediation failures.
 - Prefer evidence that can be quoted back to the user in the summary panel.
 
-### 2.2 Event Log Channel Integration — P1 / L
+### 2.2 Curated Event Log Channel Integration — P1 / M
 
 Event logs remain the largest adjacent diagnostic gap for MDM, Autopilot, BitLocker, LAPS, and Defender.
 
@@ -216,7 +270,8 @@ Event logs remain the largest adjacent diagnostic gap for MDM, Autopilot, BitLoc
 
 **Implementation notes**:
 
-- Use the `windows` crate for native EVTX access on Windows.
+- Start with curated exports and focused channel intake before building a broad event-log browser.
+- Use the `windows` crate for native EVTX access on Windows where native channel access is needed.
 - Map Event ID, Level, and message text into the existing entry model.
 - Start with curated channel presets instead of a full generic event viewer.
 - Offline `.evtx` file support can follow later.
@@ -233,9 +288,9 @@ Build a dedicated Autopilot view that correlates profile files, ESP state, relev
 - Correlate known event IDs and failure signatures
 - Support Autopilot v2 bootstrapper and provisioning hints
 
-### 2.4 MDM Policy Viewer — P2 / L
+### 2.4 Registry-Backed MDM Policy Viewer — P1 / L
 
-Read effective policy, provider-delivered policy, and enrollment state from registry paths such as:
+Read structured device state from registry paths such as:
 
 - `HKLM\SOFTWARE\Microsoft\PolicyManager\current\device\<Area>\`
 - `HKLM\SOFTWARE\Microsoft\PolicyManager\Providers\<GUID>\default\Device\<Area>\`
@@ -247,6 +302,10 @@ Read effective policy, provider-delivered policy, and enrollment state from regi
 - Highlight MDM and Group Policy conflicts
 - Link CSP paths to documentation
 - Export policy snapshots as JSON
+
+**Implementation note**:
+
+- Treat registry intake as structured state and correlation data, not as another log stream.
 
 ### 2.5 macOS Intune Log Support — P3 / XL
 

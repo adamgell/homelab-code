@@ -160,4 +160,3 @@ CMTrace Open registers for `.log` and `.lo_` file extensions.
 ## License
 
 [MIT](LICENSE)
-

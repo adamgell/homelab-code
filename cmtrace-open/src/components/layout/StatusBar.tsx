@@ -100,14 +100,14 @@ export function StatusBar() {
     const logStatusText =
       entries.length > 0
         ? [
-            `${entries.length} entries`,
-            `${totalLines} lines`,
-            `${formatDetected ?? "Unknown"} format`,
-            parserDisplay?.provenanceLabel,
-            parserDisplay?.qualityLabel,
-          ]
-            .filter((part): part is string => Boolean(part))
-            .join(" | ")
+          `${entries.length} entries`,
+          `${totalLines} lines`,
+          `${formatDetected ?? "Unknown"} format`,
+          parserDisplay?.provenanceLabel,
+          parserDisplay?.qualityLabel,
+        ]
+          .filter((part): part is string => Boolean(part))
+          .join(" | ")
         : failureReason
           ? `Reason: ${failureReason}`
           : sourceStatus.kind !== "idle"

@@ -31,19 +31,19 @@ export type KnownSourceDefaultFileSelectionBehavior =
 
 export type LogSource =
   | {
-      kind: "file";
-      path: string;
-    }
+    kind: "file";
+    path: string;
+  }
   | {
-      kind: "folder";
-      path: string;
-    }
+    kind: "folder";
+    path: string;
+  }
   | {
-      kind: "known";
-      sourceId: string;
-      defaultPath: string;
-      pathKind: KnownSourcePathKind;
-    };
+    kind: "known";
+    sourceId: string;
+    defaultPath: string;
+    pathKind: KnownSourcePathKind;
+  };
 
 export interface FolderEntry {
   name: string;

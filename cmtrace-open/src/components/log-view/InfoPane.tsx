@@ -49,9 +49,8 @@ export function InfoPane() {
       }}
     >
       <div style={{ marginBottom: "8px", color: "#444" }}>
-        {`Line ${selectedEntry.lineNumber} | ${selectedEntry.severity}${
-          selectedEntry.component ? ` | ${selectedEntry.component}` : ""
-        }${selectedEntry.timestampDisplay ? ` | ${selectedEntry.timestampDisplay}` : ""}`}
+        {`Line ${selectedEntry.lineNumber} | ${selectedEntry.severity}${selectedEntry.component ? ` | ${selectedEntry.component}` : ""
+          }${selectedEntry.timestampDisplay ? ` | ${selectedEntry.timestampDisplay}` : ""}`}
       </div>
       {parserDisplay ? (
         <div

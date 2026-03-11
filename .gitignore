@@ -4,3 +4,5 @@ cmtrace-open/.DS_Store
 cmtrace-open/src-tauri/target-tests
 cmtrace-open/src-tauri/tests/corpus/
 loginventory/
+cmtrace-open/plan.md
+cmtrace-open/cases/

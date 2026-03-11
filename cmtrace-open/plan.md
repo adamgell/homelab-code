@@ -1,92 +1,105 @@
 # CMTrace Open next implementation plan
 
-This document replaces the completed folder browser and platform log menu plan. It captures what is already shipped and what should be implemented next based on a code review of the current branch.
+This document tracks the next implementation slices after the first-pass Intune workflow and baseline source plumbing. The direction is now sample-driven evidence-bundle intake, evidence inventory, parser hardening from real samples, registry state support, and curated adjacent evidence.
 
-## Status review
+## Current position
 
-The following work is implemented and should be treated as complete:
+The following work should be treated as good enough for now:
 
 - First-class log sources: file, folder, and known platform sources.
 - Folder browsing in the left sidebar for log viewing.
 - Toolbar support for Open Folder.
 - Native app menu entries for known Windows log sources.
-- Intune analysis command support for either a file path or a directory path.
+- Intune analysis support for either a file path or a directory path.
+- First-pass IME sidecar analysis, source provenance, and diagnostics summaries.
 
-The following gaps are still present in the implementation:
-
-- True multi-file IME aggregation is now complete at the file-discovery layer. Folder analysis includes the documented IME sidecar bundle instead of narrowing back to `IntuneManagementExtension.log`, but extraction depth across those sidecar logs is still incomplete.
-- The backend returns per-event `source_file` data and an expanded `source_files` list, but the frontend Intune result types and store still collapse the analysis down to a single `sourceFile` string.
-- The timeline UI does not show which file produced each event, so cross-log correlation is still hard even though the data exists in the backend model.
-- Parser auto-detection still only covers CCM, Simple, Timestamped, and Plain text. The next Windows-focused parsers in the roadmap are still absent.
+The main gap is no longer basic Intune folder analysis. The bigger product gap is taking mixed real-world investigation evidence and turning it into a clear, reviewable inventory of what the app recognized, what it could parse, and where evidence is still missing.
 
 ## Recommended next slice
 
-The next implementation slice should focus on making Intune folder analysis actually useful for current service releases before adding more parser families.
+The next slice should establish evidence intake and coverage before more specialized parser work.
 
-1. Finish IME folder aggregation.
-2. Surface source-file context in the Intune UI.
-3. Expand event extraction to the highest-value sidecar logs.
-4. Start the next parser family after the Intune path is solid.
+1. Add sample intake for mixed investigation evidence.
+2. Ship an evidence inventory with provenance and parse status.
+3. Harden existing parsers and IME rules from real samples.
+4. Add registry snapshot support as structured device state.
+5. Add curated event-log intake for adjacent evidence.
 
-## Phase 1: Fix IME folder aggregation
+## Phase 1: Sample intake baseline
 
-Goal: make directory analysis include the logs that matter in the IME logs folder instead of silently narrowing back to the primary log.
+Goal: make a local investigation folder usable even when it contains a mix of logs, exports, and partially supported artifacts.
 
-- Completed: IME file discovery now includes the known sidecar files first: `IntuneManagementExtension.log`, `AppWorkload.log`, `AppActionProcessor.log`, `AgentExecutor.log`, `HealthScripts.log`, `ClientHealth.log`, `ClientCertCheck.log`, `DeviceHealthMonitoring.log`, `Sensor.log`, `Win32AppInventory.log`, and `ImeUI.log`.
-- Keep the file list deterministic and ordered so timeline output is stable across runs.
-- Add tests that cover a folder containing both `IntuneManagementExtension.log` and `AppWorkload.log` so the regression cannot return.
+- Accept a mixed evidence bundle instead of assuming one log family.
+- Classify inputs into logs, registry snapshots, curated event exports, and unknown artifacts.
+- Produce a deterministic intake summary with recognized sources, parse failures, and obvious missing evidence.
+- Preserve stable ordering so comparisons across sample revisions stay easy.
 
-Primary files:
+Expected outcome:
 
-- `src-tauri/src/commands/intune.rs`
-- `src-tauri/src/intune/models.rs`
+- A user can point the app at a local evidence bundle and immediately understand what evidence is available and what is not yet supported.
 
-## Phase 2: Show file provenance in the Intune UI
+## Phase 2: Evidence inventory and provenance
 
-Goal: let users see which source log produced each event and confirm which files were included in a folder analysis.
+Goal: make every investigation start with coverage and source traceability.
 
-- Extend the frontend `IntuneAnalysisResult` type to include `sourceFiles`.
-- Store `sourceFiles` in the Intune Zustand store.
-- Show included files in the summary view for folder-based analysis.
-- Add source-file labels or a dedicated column in the timeline so events from `AppWorkload.log` and `AgentExecutor.log` are distinguishable.
+- Show included artifacts, ignored artifacts, parse status, and basic time coverage.
+- Surface provenance throughout the UI so timelines and summaries identify their source artifact.
+- Make partial evidence obvious so conclusions are easier to trust and review.
 
-Primary files:
+Expected outcome:
 
-- `src/types/intune.ts`
-- `src/stores/intune-store.ts`
-- `src/components/intune/IntuneDashboard.tsx`
-- `src/components/intune/EventTimeline.tsx`
+- The app can answer which artifact produced each notable event and whether the supplied evidence is broad enough to support a conclusion.
 
-## Phase 3: Improve high-value IME event extraction
+## Phase 3: Parser hardening from real samples
 
-Goal: make the extra files count by recognizing the event families they contain.
+Goal: improve reliability of the parsers and evidence rules already in the product before expanding into more speculative formats.
 
-- Add explicit patterns for `AppWorkload.log` download, staging, and install events.
-- Add policy and assignment tracking from `AppActionProcessor.log`.
-- Add script execution and exit-code emphasis for `AgentExecutor.log`.
-- Add remediation scheduling signals from `HealthScripts.log`.
-- Revisit summary counters so newer event types are not hidden inside generic buckets.
+- Use real samples to tighten detection, multiline handling, timestamp parsing, and severity mapping.
+- Track unsupported patterns and unknown source families discovered during intake.
+- Keep Intune rule work in maintenance mode: improve it when samples expose repeatable gaps, not as a standalone feature track.
 
-Primary files:
+Expected outcome:
 
-- `src-tauri/src/intune/event_tracker.rs`
-- `src-tauri/src/intune/download_stats.rs`
-- `src-tauri/src/intune/timeline.rs`
+- Fewer generic events, fewer parse misses, and better evidence quality on real customer-style samples.
 
-## Phase 4: Resume parser expansion
+## Phase 4: Registry snapshot support
 
-Once the IME folder workflow is correct, the next parser work should be:
+Goal: ingest registry evidence as structured device state that can be queried and correlated with logs.
+
+- Start with practical snapshot inputs such as exported `.reg` files.
+- Normalize hives, keys, and values so enrollment, policy, and app-management views can reference them directly.
+- Focus on high-value device state such as MDM enrollment, PolicyManager data, and app-management state.
+
+Expected outcome:
+
+- Registry evidence becomes first-class correlation data rather than an unstructured attachment.
+
+## Phase 5: Curated event-log intake
+
+Goal: add adjacent evidence sources without blocking on a full generic event viewer.
+
+- Start with curated channels relevant to MDM, Autopilot, enrollment, BitLocker, LAPS, and Defender.
+- Prefer practical intake paths such as saved exports and offline investigation artifacts first.
+- Correlate event IDs, levels, and timestamps into the shared evidence inventory and timelines.
+
+Expected outcome:
+
+- Local investigation bundles can include focused event evidence that complements logs and registry state.
+
+## Follow-on parser expansion
+
+After intake, inventory, and hardening are in place, the next parser work should stay sample-led. Current likely priorities remain:
 
 1. CBS/Panther format family.
 2. WindowsUpdate.log high-precision timestamp support.
 3. SetupAPI section-based logs.
 
-This order matches the current known-source menu and gives the app better coverage for Intune, Autopilot, servicing, and Windows setup triage.
+These formats are still high-value, but they should land in response to real investigation demand rather than as the primary product track.
 
 ## Validation
 
-When the next slice is implemented, validate with:
+When the next slices are implemented, validate with:
 
 1. Frontend build.
 2. Rust test suite.
-3. Manual folder analysis against a real IME logs directory containing both `IntuneManagementExtension.log` and at least one sidecar log such as `AppWorkload.log`.
+3. Manual intake against a real mixed local evidence bundle containing logs plus at least one adjacent artifact such as a registry export or curated event-log export.
