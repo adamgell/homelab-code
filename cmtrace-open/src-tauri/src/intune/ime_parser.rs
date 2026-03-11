@@ -21,9 +21,7 @@ static IME_LOG_RE: Lazy<Regex> = Lazy::new(|| {
 /// Regex for simple timestamped log lines (fallback format):
 /// YYYY-MM-DD HH:MM:SS.fff message
 static SIMPLE_TS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r#"^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.\d]*)\s+(?P<msg>.+)$"#
-    ).unwrap()
+    Regex::new(r#"^(?P<ts>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}[\.\d]*)\s+(?P<msg>.+)$"#).unwrap()
 });
 
 /// Parse IME log content into structured lines.

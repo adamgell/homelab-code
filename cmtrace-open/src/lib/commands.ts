@@ -1,9 +1,53 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LogFormat, ParseResult } from "../types/log";
+import type {
+  FolderListingResult,
+  KnownSourceMetadata,
+  LogFormat,
+  LogSource,
+  ParseResult,
+} from "../types/log";
 import type { IntuneAnalysisResult } from "../types/intune";
 
 export async function openLogFile(path: string): Promise<ParseResult> {
   return invoke<ParseResult>("open_log_file", { path });
+}
+
+export async function listLogFolder(path: string): Promise<FolderListingResult> {
+  return invoke<FolderListingResult>("list_log_folder", { path });
+}
+
+export async function getKnownLogSources(): Promise<KnownSourceMetadata[]> {
+  return invoke<KnownSourceMetadata[]>("get_known_log_sources");
+}
+
+export async function openLogSourceFile(source: LogSource): Promise<ParseResult> {
+  if (source.kind === "file") {
+    return openLogFile(source.path);
+  }
+
+  if (source.kind === "known" && source.pathKind === "file") {
+    return openLogFile(source.defaultPath);
+  }
+
+  throw new Error(
+    `Source kind '${source.kind}' does not resolve to a single file path.`
+  );
+}
+
+export async function listLogSourceFolder(
+  source: LogSource
+): Promise<FolderListingResult> {
+  if (source.kind === "folder") {
+    return listLogFolder(source.path);
+  }
+
+  if (source.kind === "known" && source.pathKind === "folder") {
+    return listLogFolder(source.defaultPath);
+  }
+
+  throw new Error(
+    `Source kind '${source.kind}' does not resolve to a folder path.`
+  );
 }
 
 export async function startTail(

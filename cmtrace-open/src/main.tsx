@@ -1,6 +1,12 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import { useAppMenu } from "./hooks/use-app-menu";
+
+function AppRoot() {
+  useAppMenu();
+  return <App />;
+}
 
 // Reset default browser styles for a desktop-app feel
 const style = document.createElement("style");
@@ -42,6 +48,6 @@ document.head.appendChild(style);
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    <AppRoot />
   </React.StrictMode>
 );

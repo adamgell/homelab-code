@@ -33,17 +33,32 @@ fn bench_parse_100k_lines() {
 
     match result {
         Ok((r, _date_order)) => {
-            eprintln!("Parse: {}ms ({} entries, {} errors, format: {:?})",
-                parse_ms, r.entries.len(), r.parse_errors, r.format_detected);
-            eprintln!("Throughput: {:.0} lines/sec", r.entries.len() as f64 / (parse_ms as f64 / 1000.0));
-            assert!(r.entries.len() > 50000, "Expected at least 50K entries parsed");
+            eprintln!(
+                "Parse: {}ms ({} entries, {} errors, format: {:?})",
+                parse_ms,
+                r.entries.len(),
+                r.parse_errors,
+                r.format_detected
+            );
+            eprintln!(
+                "Throughput: {:.0} lines/sec",
+                r.entries.len() as f64 / (parse_ms as f64 / 1000.0)
+            );
+            assert!(
+                r.entries.len() > 50000,
+                "Expected at least 50K entries parsed"
+            );
         }
         Err(e) => panic!("Parse failed: {}", e),
     }
 
     // Performance assertion: 100K lines should parse in under 2 seconds (release only)
     if !is_debug_build() {
-        assert!(parse_ms < 2000, "Parse took {}ms, expected <2000ms", parse_ms);
+        assert!(
+            parse_ms < 2000,
+            "Parse took {}ms, expected <2000ms",
+            parse_ms
+        );
     }
 }
 
@@ -82,7 +97,8 @@ fn bench_intune_analysis_100k() {
 
     // Measure download stats
     let start = Instant::now();
-    let downloads = app_lib::intune::download_stats::extract_downloads(&lines);
+    let downloads =
+        app_lib::intune::download_stats::extract_downloads(&lines, "C:/Logs/AppWorkload.log");
     let download_ms = start.elapsed().as_millis();
     eprintln!("Downloads: {}ms ({} stats)", download_ms, downloads.len());
 
@@ -91,6 +107,10 @@ fn bench_intune_analysis_100k() {
 
     // Intune analysis of 100K lines should complete in under 5 seconds (release only)
     if !is_debug_build() {
-        assert!(total_ms < 5000, "Intune analysis took {}ms, expected <5000ms", total_ms);
+        assert!(
+            total_ms < 5000,
+            "Intune analysis took {}ms, expected <5000ms",
+            total_ms
+        );
     }
 }

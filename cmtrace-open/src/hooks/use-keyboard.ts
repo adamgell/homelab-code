@@ -2,6 +2,92 @@ import { useEffect } from "react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useLogStore } from "../stores/log-store";
 import { useUiStore } from "../stores/ui-store";
+import { useFilterStore } from "../stores/filter-store";
+import { refreshCurrentLogSource } from "../lib/log-source";
+import { useAppActions } from "../components/layout/Toolbar";
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+
+  return (
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT" ||
+    target.isContentEditable
+  );
+}
+
+function isLogListFocused(): boolean {
+  const active = document.activeElement;
+
+  if (!(active instanceof HTMLElement)) {
+    return false;
+  }
+
+  return active.closest("[data-log-list='true']") !== null;
+}
+
+function getDisplayEntryIds(): number[] {
+  const logState = useLogStore.getState();
+  const filteredIds = useFilterStore.getState().filteredIds;
+
+  if (!filteredIds) {
+    return logState.entries.map((entry) => entry.id);
+  }
+
+  return logState.entries
+    .filter((entry) => filteredIds.has(entry.id))
+    .map((entry) => entry.id);
+}
+
+function navigateSelection(key: string): boolean {
+  const entryIds = getDisplayEntryIds();
+
+  if (entryIds.length === 0) {
+    return false;
+  }
+
+  const logState = useLogStore.getState();
+  const currentIndex =
+    logState.selectedId === null ? -1 : entryIds.indexOf(logState.selectedId);
+  const lastIndex = entryIds.length - 1;
+
+  let nextIndex = currentIndex;
+
+  switch (key) {
+    case "ArrowDown":
+      nextIndex = currentIndex < 0 ? 0 : Math.min(currentIndex + 1, lastIndex);
+      break;
+    case "ArrowUp":
+      nextIndex = currentIndex < 0 ? lastIndex : Math.max(currentIndex - 1, 0);
+      break;
+    case "PageDown":
+      nextIndex = currentIndex < 0 ? 0 : Math.min(currentIndex + 20, lastIndex);
+      break;
+    case "PageUp":
+      nextIndex = currentIndex < 0 ? lastIndex : Math.max(currentIndex - 20, 0);
+      break;
+    case "Home":
+      nextIndex = 0;
+      break;
+    case "End":
+      nextIndex = lastIndex;
+      break;
+    default:
+      return false;
+  }
+
+  const nextId = entryIds[nextIndex];
+
+  if (nextId === undefined || nextId === logState.selectedId) {
+    return true;
+  }
+
+  logState.selectEntry(nextId);
+  return true;
+}
 
 /**
  * Keyboard shortcut handler matching CMTrace's accelerator table.
@@ -18,82 +104,163 @@ import { useUiStore } from "../stores/ui-store";
  *   F5      → Refresh
  */
 export function useKeyboard() {
-  const togglePause = useLogStore((s) => s.togglePause);
-  const toggleDetails = useUiStore((s) => s.toggleDetails);
-  const setShowFindDialog = useUiStore((s) => s.setShowFindDialog);
-  const setShowFilterDialog = useUiStore((s) => s.setShowFilterDialog);
-  const setShowErrorLookupDialog = useUiStore(
-    (s) => s.setShowErrorLookupDialog
+  const showFindDialogOpen = useUiStore((state) => state.showFindDialog);
+  const showFilterDialogOpen = useUiStore((state) => state.showFilterDialog);
+  const showErrorLookupDialogOpen = useUiStore(
+    (state) => state.showErrorLookupDialog
   );
+  const showAboutDialogOpen = useUiStore((state) => state.showAboutDialog);
+  const {
+    openLogFileDialog,
+    showFindDialog,
+    showFilterDialog,
+    showErrorLookupDialog,
+    togglePauseResume,
+    toggleDetailsPane,
+    dismissTransientDialogs,
+  } = useAppActions();
 
   useEffect(() => {
-    const handleKeyDown = async (e: KeyboardEvent) => {
-      const ctrl = e.ctrlKey || e.metaKey;
+    const handleKeyDown = async (event: KeyboardEvent) => {
+      const ctrl = event.ctrlKey || event.metaKey;
+      const isInput = isTypingTarget(event.target);
+      const isDialogOpen =
+        showFindDialogOpen ||
+        showFilterDialogOpen ||
+        showErrorLookupDialogOpen ||
+        showAboutDialogOpen;
 
-      // Ignore keyboard shortcuts when typing in an input
-      const target = e.target as HTMLElement;
-      const isInput =
-        target.tagName === "INPUT" ||
-        target.tagName === "TEXTAREA" ||
-        target.tagName === "SELECT";
+      if (ctrl && event.key.toLowerCase() === "o") {
+        event.preventDefault();
+        await openLogFileDialog();
+        return;
+      }
 
-      if (ctrl && e.key === "o") {
-        e.preventDefault();
-        const openBtn = document.querySelector(
-          '[title="Open (Ctrl+O)"]'
-        ) as HTMLButtonElement;
-        openBtn?.click();
-      } else if (ctrl && e.key === "f") {
-        e.preventDefault();
-        setShowFindDialog(true);
-      } else if (e.key === "F3" && !isInput) {
-        e.preventDefault();
-        setShowFindDialog(true);
-      } else if (ctrl && e.key === "u") {
-        e.preventDefault();
-        togglePause();
-      } else if (ctrl && e.key === "h") {
-        e.preventDefault();
-        toggleDetails();
-      } else if (ctrl && e.key === "l") {
-        e.preventDefault();
-        setShowFilterDialog(true);
-      } else if (ctrl && e.key === "e") {
-        e.preventDefault();
-        setShowErrorLookupDialog(true);
-      } else if (ctrl && e.key === "c" && !isInput) {
-        // Ctrl+C: Copy selected entry as tab-separated text
-        e.preventDefault();
-        const state = useLogStore.getState();
-        if (state.selectedId !== null) {
-          const entry = state.entries.find((e) => e.id === state.selectedId);
-          if (entry) {
-            const text = [
-              entry.message,
-              entry.component ?? "",
-              entry.timestampDisplay ?? "",
-              entry.threadDisplay ?? "",
-            ].join("\t");
-            try {
-              await writeText(text);
-            } catch (err) {
-              console.error("Failed to copy:", err);
-            }
-          }
+      if (ctrl && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        showFindDialog();
+        return;
+      }
+
+      if (event.key === "F3" && !isInput) {
+        if (showFindDialogOpen) {
+          return;
         }
-      } else if (e.key === "Escape" && !isInput) {
-        setShowFindDialog(false);
-        setShowFilterDialog(false);
+
+        event.preventDefault();
+
+        const logState = useLogStore.getState();
+
+        if (!logState.hasFindSession()) {
+          showFindDialog();
+          return;
+        }
+
+        if (event.shiftKey) {
+          logState.findPrevious("keyboard.shift-f3");
+          return;
+        }
+
+        logState.findNext("keyboard.f3");
+        return;
+      }
+
+      if (ctrl && event.key.toLowerCase() === "u") {
+        event.preventDefault();
+        togglePauseResume();
+        return;
+      }
+
+      if (ctrl && event.key.toLowerCase() === "h") {
+        event.preventDefault();
+        toggleDetailsPane();
+        return;
+      }
+
+      if (ctrl && event.key.toLowerCase() === "l") {
+        event.preventDefault();
+        showFilterDialog();
+        return;
+      }
+
+      if (ctrl && event.key.toLowerCase() === "e") {
+        event.preventDefault();
+        showErrorLookupDialog();
+        return;
+      }
+
+      if (event.key === "F5" && !isInput) {
+        event.preventDefault();
+
+        try {
+          await refreshCurrentLogSource("keyboard.f5");
+        } catch (error) {
+          console.error("[keyboard] refresh failed", { error });
+        }
+
+        return;
+      }
+
+      if (ctrl && event.key.toLowerCase() === "c" && !isInput) {
+        event.preventDefault();
+        const state = useLogStore.getState();
+
+        if (state.selectedId === null) {
+          return;
+        }
+
+        const entry = state.entries.find(
+          (entryItem) => entryItem.id === state.selectedId
+        );
+
+        if (!entry) {
+          return;
+        }
+
+        const text = [
+          entry.message,
+          entry.component ?? "",
+          entry.timestampDisplay ?? "",
+          entry.threadDisplay ?? "",
+        ].join("\t");
+
+        try {
+          await writeText(text);
+        } catch (error) {
+          console.error("[keyboard] failed to copy selected entry", { error });
+        }
+        return;
+      }
+
+      if (
+        !ctrl &&
+        !isInput &&
+        !isDialogOpen &&
+        isLogListFocused() &&
+        navigateSelection(event.key)
+      ) {
+        event.preventDefault();
+        return;
+      }
+
+      if (event.key === "Escape" && !isInput) {
+        dismissTransientDialogs("keyboard.escape");
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [
-    togglePause,
-    toggleDetails,
-    setShowFindDialog,
-    setShowFilterDialog,
-    setShowErrorLookupDialog,
+    dismissTransientDialogs,
+    openLogFileDialog,
+    showAboutDialogOpen,
+    showErrorLookupDialog,
+    showErrorLookupDialogOpen,
+    showFilterDialog,
+    showFilterDialogOpen,
+    showFindDialog,
+    showFindDialogOpen,
+    toggleDetailsPane,
+    togglePauseResume,
   ]);
 }

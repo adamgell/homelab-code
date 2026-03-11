@@ -5,6 +5,41 @@ Internal planning document. Organized by category with effort estimates and prio
 **Priority key**: P0 = critical path, P1 = high value, P2 = nice-to-have, P3 = future consideration
 **Effort key**: S = small (< 4 hours), M = medium (4–16 hours), L = large (16–40 hours), XL = 40+ hours
 
+## Completed
+
+The following work is shipped and should be treated as complete unless a regression is found:
+
+- Log sources are first-class inputs: **file**, **folder**, and **known platform sources/presets**.
+- Log view supports opening a folder and browsing files from a left sidebar.
+- The toolbar includes **Open Folder**.
+- Known source presets now include **Windows IME logs**.
+- Intune analysis accepts an **IME folder path** (not only a single file).
+- Native menu preset selections are emitted to the frontend and routed through the shared source-loading flow.
+- IME folder file discovery includes the documented sidecar bundle instead of narrowing back to `IntuneManagementExtension*.log`.
+- Intune results retain the expanded source file list in the frontend model and store.
+- The Intune summary/header shows included source-file context for folder analysis.
+- The Intune timeline shows per-event source-file context.
+- Intune extraction now applies file-aware rules for `AppWorkload.log`, `AppActionProcessor.log`, `AgentExecutor.log`, and `HealthScripts.log`.
+- Intune sidecar events now use more specific heuristic naming for install phases, policy evaluation, and detection/remediation script context.
+- Aggregated IME timelines now sort by parsed timestamps and collapse consumed duplicate completion events more reliably.
+- Intune summary output now includes deterministic diagnostics counters such as pending, timed out, failed downloads, successful downloads, and failed scripts.
+- Intune summary now includes evidence-based diagnostics guidance with likely issue clusters, supporting evidence, and next checks.
+- Intune diagnostics now apply stronger evidence rules for download, install, applicability, and script-failure patterns.
+- Intune diagnostics now include rule-based suggested fixes when known error codes or log evidence make remediation guidance specific enough to trust.
+- Parser expansion has been reassessed after the richer IME extraction pass and remains lower priority than sample-driven Intune diagnostics refinement.
+
+## Active Focus
+
+The remaining Intune gap is now sample-driven refinement of the Intune evidence library and broader remediation coverage across additional IME sidecar patterns rather than folder selection, provenance display, baseline diagnostics guidance, or parser-priority ambiguity.
+
+### Recommended Next Implementation Slice
+
+The next slice should stay focused on Intune diagnostics quality before any parser expansion work is resumed:
+
+1. Expand the evidence-rule library using real failing log samples, especially for less common AppWorkload and remediation edge cases.
+2. Grow guided remediation coverage only where the extracted evidence stays deterministic and auditable.
+3. Reintroduce parser expansion only after the next round of Intune sample-driven refinement no longer yields higher diagnostic value.
+
 ---
 
 ## 1. Additional Log Format Parsers
@@ -29,6 +64,7 @@ YYYY-MM-DD HH:MM:SS, <Level> <Component> <Message>
 - HRESULT codes at line end: `[HRESULT = 0x80070002]`
 
 **Implementation notes**:
+
 - Single new parser module (`parser/cbs.rs`) covers all 7+ log files in this family.
 - Auto-detect trigger: first line matches `^\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2},\s`.
 - Extract HRESULT from message tail for error lookup integration.
@@ -54,6 +90,7 @@ Section-delimited format using `>>>` (start) and `<<<` (end) markers. Not line-p
 - Exit status: `SUCCESS` or `FAILURE(0xHHHHHHHH)`.
 
 **Implementation notes**:
+
 - Model sections as collapsed entries in the virtual list; expand on click.
 - Section title becomes the "message" field; section type becomes "component."
 - Map `FAILURE` exit status to Error severity, `SUCCESS` to Info.
@@ -75,6 +112,7 @@ MSI logs alternate between several line formats within a single file:
 - Header/footer: `=== Verbose logging started: ...` / `=== Verbose logging stopped: ...`
 
 **Implementation notes**:
+
 - Classify each line by prefix pattern, then dispatch to sub-parsers.
 - Map `Return value 3` to Error severity, `Return value 2` to Warning.
 - Extract Property(S)/Property(C) pairs into a structured properties view (info pane enhancement).
@@ -93,6 +131,7 @@ YYYY/MM/DD HH:MM:SS.mmmmmmm PID  TID  <Component>  <Message>
 - Key markers: `*START*` / `*END*` delimit operations; `*FAILED*` and `FATAL:` indicate errors.
 
 **Implementation notes**:
+
 - The existing timestamped parser handles ISO and slash-date formats but does not support 7-digit sub-second precision. Extend or add a dedicated variant.
 - Detect `*FAILED*` and `FATAL:` in message for error severity assignment.
 - Auto-detect trigger: timestamp matches `^\d{4}/\d{2}/\d{2}\s\d{2}:\d{2}:\d{2}\.\d{7}`.
@@ -104,6 +143,7 @@ YYYY/MM/DD HH:MM:SS.mmmmmmm PID  TID  <Component>  <Message>
 Tab-delimited with GUID prefix. Fields: GUID, timestamp (with timezone offset), EventID, Category, Level, Update GUID, HRESULT, numeric, Agent name, Status, Operation type, Message.
 
 **Implementation notes**:
+
 - New parser module (`parser/tab_delimited.rs`).
 - Split on `\t`; map fields positionally.
 - Auto-detect trigger: first data line starts with `{` and contains tab characters.
@@ -115,6 +155,7 @@ Tab-delimited with GUID prefix. Fields: GUID, timestamp (with timezone offset), 
 Self-describing format with `#Fields:` header defining column order. Data lines are space-delimited. Missing values represented by `-`.
 
 **Implementation notes**:
+
 - Parse `#Fields:` line to build dynamic column mapping.
 - Skip `#` header lines.
 - Map `DROP` action to Warning severity, `ALLOW` to Info.
@@ -127,6 +168,7 @@ Self-describing format with `#Fields:` header defining column order. Data lines 
 Standard XML with `<Diagnostic>` elements containing `DateTime`, `Component`, `Level`, `Message`, `ErrorCode`.
 
 **Implementation notes**:
+
 - Use `quick-xml` crate (already a common Rust XML parser).
 - Map each `<Diagnostic>` element to a log entry.
 - `Diagerr.xml` = Error level; `Diagwrn.xml` = Warning level (override if `<Level>` element differs).
@@ -138,6 +180,7 @@ Standard XML with `<Diagnostic>` elements containing `DateTime`, `Component`, `L
 Both use UTF-16 LE with BOM. `PFRO.log` has timestamped operations; `SrtTrail.txt` uses section/key-value format.
 
 **Implementation notes**:
+
 - Add UTF-16 LE BOM detection to the encoding handler (currently UTF-8 + Windows-1252 only).
 - `PFRO.log`: parse operations (`Deleted file`, `Renamed file`, `Could not delete file`) and extract error codes.
 - `SrtTrail.txt`: section-based (dashed separators) with key-value pairs — present as structured entries.
@@ -163,14 +206,16 @@ Extend `parser/detect.rs` to support the new formats. Proposed priority order:
 
 ## 2. Intune Diagnostic Expansion
 
-Currently implemented: IME log analysis (IntuneManagementExtension.log only) with event timeline, download stats, and summary dashboard.
+Currently implemented: IME log analysis with event timeline, download stats, and summary dashboard. Analysis can be launched from a single IME log file or an IME logs folder.
 
 ### 2.1 Additional IME Log File Support — P0 / M
 
-The following IME log files reside in `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\` and use the same CMTrace format as `IntuneManagementExtension.log`. The existing CCM parser handles them, but the Intune analysis engine (`event_tracker.rs`) only processes the primary IME log.
+Status: partially implemented, with multi-file aggregation and first-pass sidecar-aware extraction now in place.
+
+The following IME log files reside in `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\` and use the same CMTrace format as `IntuneManagementExtension.log`. The existing CCM parser handles them, and the Intune analysis engine now includes first-pass file-aware extraction for the highest-value sidecar logs, but deeper heuristics are still incomplete.
 
 | Log File | Diagnostic Value | Event Types |
-|---|---|---|
+| --- | --- | --- |
 | `AppWorkload.log` | Dedicated Win32/WinGet app workload (2408+) — download bytes, DO progress, staging, install | Win32App, WinGetApp, ContentDownload |
 | `AppActionProcessor.log` | App action decisions, assignment workflow, applicability | Win32App, PolicyEvaluation |
 | `AgentExecutor.log` | PowerShell script execution — command line, stdout, stderr, exit codes | PowerShellScript, Remediation |
@@ -183,22 +228,27 @@ The following IME log files reside in `C:\ProgramData\Microsoft\IntuneManagement
 | `ImeUI.log` | Toast notification UI events | Other |
 
 **Implementation notes**:
-- Extend the Intune analysis command to accept a directory path rather than a single file path.
-- Auto-discover all `.log` files in the IME Logs directory.
-- Merge events from all files into a unified timeline, deduplicating by timestamp + message hash.
-- Add a "Source File" column to the event timeline so users can trace events to their origin log.
-- `AppWorkload.log` is the highest-priority addition — it contains the detailed download/install data that moved out of the primary IME log in service release 2408.
 
-### 2.2 IME Log Directory Quick-Open — P0 / S
+- Completed: the Intune analysis command accepts a directory path rather than only a single file path.
+- Completed: file discovery now includes the known IME sidecar logs in folder analysis instead of preferring only `IntuneManagementExtension*.log` when that file exists.
+- Completed: file-aware extraction rules now classify core events from `AppWorkload.log`, `AppActionProcessor.log`, `AgentExecutor.log`, and `HealthScripts.log`.
+- Completed: sidecar-derived events now use more specific heuristic names for AppWorkload install phases, AppActionProcessor policy evaluation, and AgentExecutor or HealthScripts detection versus remediation context.
+- Completed: aggregated timelines now sort by parsed timestamps and collapse consumed duplicate completion events more reliably.
+- Completed: per-event source-file context is exposed in the timeline UI.
+- Completed: the expanded source-file list is exposed in the frontend model and summary/header UI.
+- Completed: the Intune summary now surfaces deterministic diagnostics counters for download outcomes, pending work, timeouts, and script failures.
+- Remaining: deepen extraction heuristics so download/install, applicability, remediation, and script failures carry more specific classifications and evidence.
+- `AppWorkload.log` remains the highest-priority addition because it contains the detailed download/install data that moved out of the primary IME log in service release 2408.
 
-Add a "Open IME Logs" toolbar button or menu item that:
+### 2.2 IME Log Directory Quick-Open — Implemented
 
-1. Defaults to `C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\`.
-2. Lists all `.log` files in that directory with size and last-modified timestamps.
-3. Allows selection of one or more files.
-4. Optionally runs Intune analysis on the entire directory.
+The app now supports the IME directory workflow through known platform sources/presets and shared source loading:
 
-This reduces the most common CMTrace workflow from 6 clicks to 1.
+1. Users can select a known IME source from the native menu.
+2. The frontend routes the preset selection through the same source-loading flow used by other source types.
+3. Users can also open folders directly from the toolbar and browse files in the left sidebar.
+
+This closes the core quick-open gap for IME diagnostics.
 
 ### 2.3 Event Log Channel Integration — P1 / L
 
@@ -218,6 +268,7 @@ Windows Event Logs (EVTX) are a primary diagnostic source for MDM, Autopilot, Bi
 | `Intune-Bootstrapper-Agent` (Applications and Services Logs) | Autopilot v2 (Device Preparation) |
 
 **Implementation notes**:
+
 - Use the `windows` crate (`EvtQuery`, `EvtNext`, `EvtRender`) for native EVTX reading on Windows.
 - Map Event ID + Level to the existing log entry model (message, component, severity, timestamp, thread).
 - Add an "Event Logs" tab or panel in the sidebar alongside the existing log viewer.
@@ -236,6 +287,7 @@ Build a dedicated Autopilot diagnostic view (similar to the existing Intune Dash
 - Autopilot v2: `Intune-Bootstrapper-Agent` event log + `AutopilotDevicePrepHint` registry value
 
 **Panel features**:
+
 - Deployment mode detection (User-Driven, Self-Deploying, Pre-Provisioned, Device Preparation)
 - ESP phase timeline (Device Prep → Device Setup → Account Setup) with status indicators
 - Profile configuration summary (extracted from JSON)
@@ -251,6 +303,7 @@ Read and display MDM policy state from registry:
 - `HKLM\SOFTWARE\Microsoft\Enrollments\<GUID>\` — enrollment state
 
 **Features**:
+
 - Side-by-side comparison of intended vs. effective policy values.
 - Highlight conflicts between MDM and Group Policy (`ControlPolicyConflict\MDMWinsOverGP`).
 - Link policy CSP paths to Microsoft Learn documentation URLs.
@@ -267,11 +320,34 @@ DateTime | Process | LogLevel | PID | Task | TaskInfo
 Located at `/Library/Logs/Microsoft/Intune/` (system) and `~/Library/Logs/Microsoft/Intune/` (user).
 
 **Implementation notes**:
+
 - New parser module (`parser/pipe_delimited.rs`).
 - Map `I` → Info, `W` → Warning, `E` → Error.
 - Add unified logging predicate execution (`log show --predicate '...'`) as a Tauri command for live macOS MDM diagnostics.
 - Add a macOS log source picker with curated predicates from the log-intune-reference.md.
 - Lower priority because the primary user base is Windows-focused.
+
+### 2.7 Diagnostics Stats and Guided Issue Insight — P1 / M
+
+Add a diagnostics summary layer that turns raw log output into actionable health signals before attempting broader issue explanation.
+
+Status: partially implemented. Deterministic diagnostics counters, issue clustering, evidence-based next checks, and first-pass suggested fixes are now shipped. Remaining work is broader health and coverage stats plus more sample-driven remediation rules.
+
+**Core capabilities**:
+
+- Log health and coverage stats: per-file counts, oldest/newest timestamps, gaps in coverage, rotated-log presence, and dominant source files.
+- Failure clustering: repeated error codes, top failing apps/scripts, retry loops, stalled downloads, and recurring remediation failures.
+- Evidence-driven issue insight: surface likely cause, supporting evidence, adjacent logs to inspect, and the next checks to run.
+- Suggested fixes should be rule-based first, tied to known error codes and patterns, rather than freeform AI-generated troubleshooting.
+
+**Implementation notes**:
+
+- Build this on top of the existing Intune aggregation pipeline so summaries use the same extracted events, downloads, and source-file provenance.
+- Start with deterministic heuristics for common Intune cases such as download failures, script exit-code failures, assignment/applicability failures, and repeated timeout patterns.
+- Reuse the embedded error lookup database and expand it with Intune-specific patterns so insight text is grounded in known evidence.
+- Present results as a compact summary panel with sections like `Likely Cause`, `Evidence`, `Next Checks`, and `Suggested Fix`.
+- Completed: current diagnostics now cover download/staging failures, install enforcement failures, applicability blocks, script failures, timeout clusters, and rule-based suggested fixes driven by known evidence.
+- Keep the initial implementation rule-based and auditable; only consider broader synthesis after the underlying fact extraction is reliable.
 
 ---
 
@@ -288,6 +364,7 @@ Display elapsed time between log entries. Original CMTrace behavior:
 - Status bar format: `Elapsed time is Xh Xm Xs Xms (X.XXX seconds)`
 
 **Implementation notes**:
+
 - Calculate delta from parsed timestamps.
 - Display in the status bar component.
 - Handle entries without timestamps gracefully (show "N/A" or skip).
@@ -301,6 +378,7 @@ Export the current view (respecting active filters) to:
 - Filtered subset only (currently visible entries after filter application)
 
 **Implementation notes**:
+
 - Reuse the existing clipboard copy logic (`commands/file_ops.rs`) as the base.
 - Add file save dialog with format selection.
 - Respect active filters — export only the visible subset.
@@ -327,6 +405,7 @@ Persistent application settings stored via Tauri's `tauri-plugin-store` or the f
 | Find history | Empty | Last 10 search terms |
 
 **Implementation notes**:
+
 - Add `tauri-plugin-store` dependency.
 - Create a `PreferencesDialog.tsx` component.
 - Load settings on app startup; write on change.
@@ -342,6 +421,7 @@ Support opening multiple log files simultaneously.
 2. **Merged view**: Interleave entries from multiple files chronologically (CMTrace's "Merge selected files" option). Add a "Source" column showing the origin filename.
 
 **Implementation notes**:
+
 - Tabbed view: extend `log-store.ts` to hold a map of `tabId → LogState`. Add a tab bar component.
 - Merged view: sort entries by timestamp across files; handle clock skew gracefully.
 - Merged view requires all files to have parseable timestamps; fall back to tabbed if timestamps are absent.
@@ -352,6 +432,7 @@ Support opening multiple log files simultaneously.
 Print the current log view.
 
 **Implementation notes**:
+
 - Generate an HTML representation of visible entries (respecting filters and highlight).
 - Use Tauri's `tauri-plugin-printer` or shell-out to the OS print dialog.
 - Include header: filename, entry count, filter summary, timestamp range.
@@ -363,6 +444,7 @@ Print the current log view.
 Add a "Regex" toggle to the Find dialog and Filter dialog.
 
 **Implementation notes**:
+
 - Use Rust's `regex` crate (already likely a transitive dependency) for pattern compilation and matching.
 - Validate regex on input; show inline error for invalid patterns.
 - Default to simple string matching (current behavior); regex is opt-in via toggle.
@@ -373,6 +455,7 @@ Add a "Regex" toggle to the Find dialog and Filter dialog.
 Store the last 10 search terms in a dropdown within the Find dialog.
 
 **Implementation notes**:
+
 - Persist via the settings store (see 3.3).
 - Show dropdown on focus or click of a history icon.
 - De-duplicate entries; most recent first.
@@ -383,6 +466,7 @@ Store the last 10 search terms in a dropdown within the Find dialog.
 Add a "Recent Files" submenu or dropdown to the File menu / toolbar.
 
 **Implementation notes**:
+
 - Store last 10 file paths in the settings store.
 - Show filename and truncated path.
 - Validate existence before offering; remove stale entries.
@@ -393,6 +477,7 @@ Add a "Recent Files" submenu or dropdown to the File menu / toolbar.
 Allow users to resize, reorder, and hide columns.
 
 **Implementation notes**:
+
 - Make column headers draggable for reordering.
 - Add drag handles on column borders for resizing.
 - Right-click column header → context menu with show/hide toggles.
@@ -411,6 +496,7 @@ Add toolbar buttons to toggle visibility of each severity level:
 - **[I]** Info (default) — toggle on/off
 
 **Implementation notes**:
+
 - These operate independently of the Filter dialog.
 - Apply as a pre-filter before the main filter pipeline.
 - Show count badges: `E: 42 | W: 128 | I: 9,830`.
@@ -421,6 +507,7 @@ Add toolbar buttons to toggle visibility of each severity level:
 The app currently uses a fixed color scheme. Add dark theme support.
 
 **Implementation notes**:
+
 - Use CSS custom properties for all colors.
 - Detect OS preference via `prefers-color-scheme` media query.
 - Allow manual override in Preferences (Light / Dark / System).
@@ -435,6 +522,7 @@ Entry 4,521 of 98,432 | Filtered: 1,203 | Errors: 42 | Warnings: 128
 ```
 
 **Implementation notes**:
+
 - Track scroll position from the virtual list.
 - Update on scroll, filter change, and new entries (tail mode).
 - Show filter reduction percentage to indicate filter effectiveness.
@@ -483,6 +571,7 @@ Make the real-time tail state more visible:
 Current: 120+ codes. CMTrace.exe ships with 710 embedded codes.
 
 **Additions needed**:
+
 - Windows Update Agent errors (0x8024xxxx series — partial coverage exists)
 - Intune-specific errors (0x87D00xxx through 0x87D1xxxx — expand from current set)
 - HRESULT standard codes (0x80004001 through 0x8007xxxx)
@@ -495,6 +584,7 @@ Current: 120+ codes. CMTrace.exe ships with 710 embedded codes.
 - COM/DCOM errors
 
 **Implementation notes**:
+
 - Consider sourcing from Microsoft's public error code documentation programmatically.
 - On Windows, supplement with `FormatMessage` system call for unknown codes (CMTrace does this via `FormatMessageW`).
 - Structure as a JSON or TOML resource file for easier maintenance than the current hardcoded `codes.rs`.
@@ -524,6 +614,7 @@ When an error code is recognized, hyperlink it to:
 Current behavior: re-parse the entire file on each tail cycle. For large files (100K+ lines), this is unnecessary.
 
 **Improvement**:
+
 - Track the byte offset of the last parsed position.
 - On tail events, read only new bytes from the last offset.
 - Parse only the new chunk and append to the existing entry list.
@@ -542,6 +633,7 @@ For large files (>10 MB), show a progress indicator during initial parse:
 Allow users to define custom log format parsers without recompiling.
 
 **Options**:
+
 - TOML/YAML format definition files with regex patterns and field mappings.
 - Lua scripting for complex parsing logic (via `mlua` crate).
 - WebAssembly parser modules for sandboxed extensibility.
@@ -553,6 +645,7 @@ This is a significant architectural change and should be deferred until the core
 For very large files (>500 MB), use memory-mapped I/O instead of buffered reads.
 
 **Implementation notes**:
+
 - Use the `memmap2` crate.
 - Combine with virtual scrolling to render only visible entries.
 - Parse on demand (lazy parsing) for entries outside the visible viewport.
@@ -566,6 +659,7 @@ For very large files (>500 MB), use memory-mapped I/O instead of buffered reads.
 The Intune "Collect Diagnostics" remote action produces a ZIP containing IME logs, event logs, registry exports, and command output. Add direct support for opening these bundles.
 
 **Features**:
+
 - Open a `.zip` or `.cab` file → extract to temp directory → list contained files.
 - Auto-identify file types and apply appropriate parsers.
 - Unified timeline view across all contained log files.
@@ -586,12 +680,14 @@ Parse and display `MDMDiagHtmlReport.html` and `MDMDiagReport.xml`:
 The Intune analysis extracts GUIDs for apps and policies. Add optional Microsoft Graph API integration to resolve these GUIDs to human-readable names.
 
 **Features**:
+
 - Authenticate via device code flow or interactive browser login.
 - Cache resolved names for the session.
 - Display resolved names alongside GUIDs in the event timeline.
 - Support: `deviceManagement/mobileApps/{id}`, `deviceManagement/deviceCompliancePolicies/{id}`, `deviceManagement/deviceConfigurations/{id}`.
 
 **Implementation notes**:
+
 - Use `reqwest` for HTTP calls from the Rust backend.
 - Make this opt-in — do not require Graph API access for basic functionality.
 - Consider shipping a local GUID → name mapping file that users can populate manually as an offline alternative.
@@ -607,6 +703,7 @@ cmtrace-open --filter "contains:error" <filepath>
 ```
 
 **Implementation notes**:
+
 - Parse CLI args in the Tauri `setup` hook.
 - Support file associations: `.log`, `.lo_`, `.evtx` (if event log support is added).
 - On Windows, register file associations during install (NSIS installer configuration).
@@ -656,6 +753,7 @@ Target: 1–2 months. Estimated effort: 2–3 weeks.
 3. **Collect Diagnostics bundle support** (7.1) — L
 4. **Preferences/settings dialog** (3.3) — M
 5. **Multi-file support** (3.4) — L
+6. **Diagnostics stats and guided issue insight polish** (2.7) — M
 
 ### Phase 4 — Polish and Parity (P2 items)
 

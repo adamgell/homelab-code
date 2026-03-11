@@ -1,8 +1,8 @@
 pub mod ccm;
-pub mod simple;
-pub mod plain;
 pub mod detect;
+pub mod plain;
 pub mod severity;
+pub mod simple;
 pub mod timestamped;
 
 use crate::models::log_entry::{LogFormat, ParseResult};
@@ -14,9 +14,7 @@ use std::path::Path;
 pub fn parse_file(path: &str) -> Result<(ParseResult, DateOrder), String> {
     let path_obj = Path::new(path);
     let content = read_file_content(path)?;
-    let file_size = std::fs::metadata(path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     let detected = detect::detect_format(&content);
     let lines: Vec<&str> = content.lines().collect();
@@ -45,8 +43,7 @@ pub fn parse_file(path: &str) -> Result<(ParseResult, DateOrder), String> {
 
 /// Read file content, handling BOM and encoding fallback.
 fn read_file_content(path: &str) -> Result<String, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read file {}: {}", path, e))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read file {}: {}", path, e))?;
 
     // Try UTF-8 first (strip BOM if present)
     let bytes_no_bom = if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {

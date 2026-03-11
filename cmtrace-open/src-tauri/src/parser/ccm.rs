@@ -10,8 +10,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::models::log_entry::{LogEntry, LogFormat, Severity};
 use super::severity::detect_severity_from_text;
+use crate::models::log_entry::{LogEntry, LogFormat, Severity};
 
 /// Compiled regex matching a complete CCM log line.
 ///
@@ -196,10 +196,22 @@ mod tests {
 
     #[test]
     fn test_severity_from_text() {
-        assert_eq!(detect_severity_from_text("An error occurred"), Severity::Error);
-        assert_eq!(detect_severity_from_text("Connection failed"), Severity::Error);
-        assert_eq!(detect_severity_from_text("Failover to backup"), Severity::Info);
-        assert_eq!(detect_severity_from_text("Warning: low disk"), Severity::Warning);
+        assert_eq!(
+            detect_severity_from_text("An error occurred"),
+            Severity::Error
+        );
+        assert_eq!(
+            detect_severity_from_text("Connection failed"),
+            Severity::Error
+        );
+        assert_eq!(
+            detect_severity_from_text("Failover to backup"),
+            Severity::Info
+        );
+        assert_eq!(
+            detect_severity_from_text("Warning: low disk"),
+            Severity::Warning
+        );
         assert_eq!(detect_severity_from_text("All good"), Severity::Info);
     }
 }

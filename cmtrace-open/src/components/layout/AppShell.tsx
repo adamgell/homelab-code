@@ -1,7 +1,8 @@
-import { useCallback } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Toolbar } from "./Toolbar";
 import { StatusBar } from "./StatusBar";
+import { FileSidebar, FILE_SIDEBAR_RECOMMENDED_WIDTH } from "./FileSidebar";
 import { LogListView } from "../log-view/LogListView";
 import { InfoPane } from "../log-view/InfoPane";
 import { FindDialog } from "../dialogs/FindDialog";
@@ -10,12 +11,23 @@ import { ErrorLookupDialog } from "../dialogs/ErrorLookupDialog";
 import { AboutDialog } from "../dialogs/AboutDialog";
 import { IntuneDashboard } from "../intune/IntuneDashboard";
 import type { FilterClause } from "../dialogs/FilterDialog";
+import type { LogEntry } from "../../types/log";
 import { useUiStore } from "../../stores/ui-store";
 import { useLogStore } from "../../stores/log-store";
 import { useFilterStore } from "../../stores/filter-store";
 import { useFileWatcher } from "../../hooks/use-file-watcher";
 import { useKeyboard } from "../../hooks/use-keyboard";
 import { useDragDrop } from "../../hooks/use-drag-drop";
+
+function buildFilterRunSignature(entries: LogEntry[], clauses: FilterClause[]): string {
+  const lastId = entries.length > 0 ? entries[entries.length - 1].id : -1;
+  const lastLineNumber = entries.length > 0 ? entries[entries.length - 1].lineNumber : -1;
+  const clauseSignature = clauses
+    .map((clause) => `${clause.field}:${clause.op}:${clause.value}`)
+    .join("|");
+
+  return `${clauseSignature}:${entries.length}:${lastId}:${lastLineNumber}`;
+}
 
 export function AppShell() {
   const activeView = useUiStore((s) => s.activeView);
@@ -36,6 +48,99 @@ export function AppShell() {
   const filterClauses = useFilterStore((s) => s.clauses);
   const setClauses = useFilterStore((s) => s.setClauses);
   const setFilteredIds = useFilterStore((s) => s.setFilteredIds);
+  const setIsFiltering = useFilterStore((s) => s.setIsFiltering);
+  const setFilterError = useFilterStore((s) => s.setFilterError);
+
+  const filterRequestIdRef = useRef(0);
+  const inFlightSignatureRef = useRef<string | null>(null);
+  const lastAppliedSignatureRef = useRef<string | null>(null);
+
+  const runFilter = useCallback(
+    async (clauses: FilterClause[], entriesSnapshot: LogEntry[], trigger: string) => {
+      if (clauses.length === 0) {
+        inFlightSignatureRef.current = null;
+        lastAppliedSignatureRef.current = null;
+        setFilteredIds(null);
+        setIsFiltering(false);
+        setFilterError(null);
+        return;
+      }
+
+      const signature = buildFilterRunSignature(entriesSnapshot, clauses);
+
+      if (
+        signature === inFlightSignatureRef.current ||
+        signature === lastAppliedSignatureRef.current
+      ) {
+        return;
+      }
+
+      inFlightSignatureRef.current = signature;
+      const requestId = filterRequestIdRef.current + 1;
+      filterRequestIdRef.current = requestId;
+
+      setFilterError(null);
+      setIsFiltering(true);
+
+      try {
+        const ids = await invoke<number[]>("apply_filter", {
+          entries: entriesSnapshot,
+          clauses,
+        });
+
+        if (filterRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        setFilteredIds(new Set(ids));
+        lastAppliedSignatureRef.current = signature;
+
+        console.info("[app-shell] applied filter snapshot", {
+          trigger,
+          clauseCount: clauses.length,
+          entryCount: entriesSnapshot.length,
+          matchedCount: ids.length,
+        });
+      } catch (err) {
+        if (filterRequestIdRef.current !== requestId) {
+          return;
+        }
+
+        const errorMessage =
+          err instanceof Error ? err.message : "Unknown filter error";
+
+        setFilterError(errorMessage);
+        console.error("[app-shell] failed to apply filter", {
+          trigger,
+          error: err,
+          clauseCount: clauses.length,
+          entryCount: entriesSnapshot.length,
+        });
+
+        throw err;
+      } finally {
+        if (filterRequestIdRef.current === requestId) {
+          inFlightSignatureRef.current = null;
+          setIsFiltering(false);
+        }
+      }
+    },
+    [setFilterError, setFilteredIds, setIsFiltering]
+  );
+
+  useEffect(() => {
+    if (filterClauses.length === 0) {
+      inFlightSignatureRef.current = null;
+      lastAppliedSignatureRef.current = null;
+      setFilteredIds(null);
+      setIsFiltering(false);
+      return;
+    }
+
+    runFilter(filterClauses, entries, "live-tail-update").catch((error) => {
+      console.warn("[app-shell] live filter refresh failed", { error });
+    });
+  }, [entries, filterClauses, runFilter, setFilteredIds, setIsFiltering]);
 
   // Start file tailing when a file is opened
   useFileWatcher();
@@ -47,23 +152,9 @@ export function AppShell() {
   const handleApplyFilter = useCallback(
     async (clauses: FilterClause[]) => {
       setClauses(clauses);
-
-      if (clauses.length === 0) {
-        setFilteredIds(null);
-        return;
-      }
-
-      try {
-        const ids = await invoke<number[]>("apply_filter", {
-          entries,
-          clauses,
-        });
-        setFilteredIds(new Set(ids));
-      } catch (err) {
-        console.error("Failed to apply filter:", err);
-      }
+      await runFilter(clauses, entries, "filter-dialog-apply");
     },
-    [entries, setClauses, setFilteredIds]
+    [entries, runFilter, setClauses]
   );
 
   return (
@@ -84,30 +175,40 @@ export function AppShell() {
             style={{
               flex: 1,
               display: "flex",
-              flexDirection: "column",
               overflow: "hidden",
             }}
           >
+            <FileSidebar width={FILE_SIDEBAR_RECOMMENDED_WIDTH} />
+
             <div
               style={{
                 flex: 1,
+                display: "flex",
+                flexDirection: "column",
                 overflow: "hidden",
               }}
             >
-              <LogListView />
-            </div>
-
-            {showInfoPane && (
               <div
                 style={{
-                  height: `${infoPaneHeight}px`,
-                  flexShrink: 0,
+                  flex: 1,
                   overflow: "hidden",
                 }}
               >
-                <InfoPane />
+                <LogListView />
               </div>
-            )}
+
+              {showInfoPane && (
+                <div
+                  style={{
+                    height: `${infoPaneHeight}px`,
+                    flexShrink: 0,
+                    overflow: "hidden",
+                  }}
+                >
+                  <InfoPane />
+                </div>
+              )}
+            </div>
           </div>
 
           <StatusBar />

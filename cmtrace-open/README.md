@@ -19,16 +19,20 @@ An open-source log viewer inspired by Microsoft's CMTrace.exe, built with **Taur
 - **Highlight** — configurable text highlighting
 - **Error Lookup** — 120+ embedded Windows/SCCM/Intune error codes
 - **Drag & drop** — open files by dropping onto the window
+- **Source types** — open logs from a file, a folder, or known platform sources/presets
+- **Folder browser** — open a folder and browse files from the left sidebar in log view
+- **Open Folder action** — toolbar includes an explicit Open Folder command
 - **Clipboard copy** — Ctrl+C copies selected entries
 
 ### Intune Diagnostics
 
-- **IME log analysis** — parses IntuneManagementExtension.log files
+- **IME log analysis** — analyzes a single IME log file or an IME logs folder
 - **Event timeline** — color-coded vertical timeline with status indicators
 - **Event types** — Win32 App, WinGet App, PowerShell Script, Remediation, ESP, Sync Session
 - **Download statistics** — size, speed, Delivery Optimization percentage
 - **Summary dashboard** — event counts, success/failure rates, log time span
 - **GUID extraction** — automatic app/policy identifier detection
+- **Known sources preset** — includes a Windows IME logs source for faster startup
 
 ### Keyboard Shortcuts
 
@@ -64,6 +68,31 @@ npm run tauri dev
 # Build for production
 npm run tauri build
 ```
+
+### Windows launcher
+
+If you want a one-click Windows entrypoint that activates a Visual Studio Developer PowerShell session first, use the included launcher:
+
+```powershell
+# Open a new PowerShell window and run the app in development mode
+.\Launch-CMTraceOpen.cmd
+
+# Build the production app
+.\Launch-CMTraceOpen.cmd Build
+
+# Build the production app and then open the built executable
+.\Launch-CMTraceOpen.cmd BuildAndRun
+```
+
+You can also run the PowerShell entrypoint directly:
+
+```powershell
+.\scripts\Launch-CMTraceOpen.ps1 -Mode Dev
+.\scripts\Launch-CMTraceOpen.ps1 -Mode Build
+.\scripts\Launch-CMTraceOpen.ps1 -Mode BuildAndRun
+```
+
+Pass `-InstallDependencies` to force `npm install` before launching. The launcher automatically resolves the latest installed Visual Studio instance with C++ build tools, enters its Developer PowerShell environment, and then runs the appropriate Tauri command.
 
 ### Build Output
 
@@ -131,3 +160,4 @@ CMTrace Open registers for `.log` and `.lo_` file extensions.
 ## License
 
 [MIT](LICENSE)
+

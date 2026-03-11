@@ -52,13 +52,32 @@ export interface IntuneSummary {
   succeeded: number;
   failed: number;
   inProgress: number;
+  pending: number;
+  timedOut: number;
   totalDownloads: number;
+  successfulDownloads: number;
+  failedDownloads: number;
+  failedScripts: number;
   logTimeSpan: string | null;
+}
+
+export type IntuneDiagnosticSeverity = "Info" | "Warning" | "Error";
+
+export interface IntuneDiagnosticInsight {
+  id: string;
+  severity: IntuneDiagnosticSeverity;
+  title: string;
+  summary: string;
+  evidence: string[];
+  nextChecks: string[];
+  suggestedFixes: string[];
 }
 
 export interface IntuneAnalysisResult {
   events: IntuneEvent[];
   downloads: DownloadStat[];
   summary: IntuneSummary;
+  diagnostics: IntuneDiagnosticInsight[];
   sourceFile: string;
+  sourceFiles: string[];
 }

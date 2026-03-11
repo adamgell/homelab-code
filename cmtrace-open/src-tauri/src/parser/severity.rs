@@ -33,52 +33,85 @@ mod tests {
 
     #[test]
     fn test_error_keyword() {
-        assert_eq!(detect_severity_from_text("An error occurred"), Severity::Error);
+        assert_eq!(
+            detect_severity_from_text("An error occurred"),
+            Severity::Error
+        );
     }
 
     #[test]
     fn test_exception_keyword() {
-        assert_eq!(detect_severity_from_text("NullPointerException thrown"), Severity::Error);
+        assert_eq!(
+            detect_severity_from_text("NullPointerException thrown"),
+            Severity::Error
+        );
     }
 
     #[test]
     fn test_critical_keyword() {
-        assert_eq!(detect_severity_from_text("CRITICAL: disk full"), Severity::Error);
+        assert_eq!(
+            detect_severity_from_text("CRITICAL: disk full"),
+            Severity::Error
+        );
     }
 
     #[test]
     fn test_fatal_keyword() {
-        assert_eq!(detect_severity_from_text("Fatal: cannot continue"), Severity::Error);
+        assert_eq!(
+            detect_severity_from_text("Fatal: cannot continue"),
+            Severity::Error
+        );
     }
 
     #[test]
     fn test_fail_keyword() {
-        assert_eq!(detect_severity_from_text("Operation failed"), Severity::Error);
+        assert_eq!(
+            detect_severity_from_text("Operation failed"),
+            Severity::Error
+        );
     }
 
     #[test]
     fn test_failover_excluded() {
-        assert_eq!(detect_severity_from_text("Failover to secondary node"), Severity::Info);
+        assert_eq!(
+            detect_severity_from_text("Failover to secondary node"),
+            Severity::Info
+        );
     }
 
     #[test]
     fn test_warning_keyword() {
-        assert_eq!(detect_severity_from_text("Warning: low memory"), Severity::Warning);
+        assert_eq!(
+            detect_severity_from_text("Warning: low memory"),
+            Severity::Warning
+        );
     }
 
     #[test]
     fn test_warn_keyword() {
-        assert_eq!(detect_severity_from_text("[WARN] config missing"), Severity::Warning);
+        assert_eq!(
+            detect_severity_from_text("[WARN] config missing"),
+            Severity::Warning
+        );
     }
 
     #[test]
     fn test_info_default() {
-        assert_eq!(detect_severity_from_text("Service started successfully"), Severity::Info);
+        assert_eq!(
+            detect_severity_from_text("Service started successfully"),
+            Severity::Info
+        );
     }
 
     #[test]
     fn test_case_insensitive() {
-        assert_eq!(detect_severity_from_text("ERROR: something broke"), Severity::Error);
-        assert_eq!(detect_severity_from_text("WARNING: check this"), Severity::Warning);
+        assert_eq!(
+            detect_severity_from_text("ERROR: something broke"),
+            Severity::Error
+        );
+        assert_eq!(
+            detect_severity_from_text("WARNING: check this"),
+            Severity::Warning
+        );
     }
 }

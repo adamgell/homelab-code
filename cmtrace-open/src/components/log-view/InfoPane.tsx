@@ -1,12 +1,13 @@
 import { useLogStore } from "../../stores/log-store";
 
 export function InfoPane() {
-  const entries = useLogStore((s) => s.entries);
-  const selectedId = useLogStore((s) => s.selectedId);
+  const entries = useLogStore((state) => state.entries);
+  const selectedId = useLogStore((state) => state.selectedId);
 
-  const selectedEntry = selectedId !== null
-    ? entries.find((e) => e.id === selectedId)
-    : null;
+  const selectedEntry =
+    selectedId !== null
+      ? entries.find((entry) => entry.id === selectedId) ?? null
+      : null;
 
   if (!selectedEntry) {
     return (
@@ -22,7 +23,9 @@ export function InfoPane() {
           borderTop: "2px solid #c0c0c0",
         }}
       >
-        Select a log entry to view details
+        {entries.length === 0
+          ? "No log entries loaded"
+          : "Select a log entry to view details (Arrow keys, Page Up/Down, Home/End supported when list is focused)"}
       </div>
     );
   }
@@ -37,11 +40,22 @@ export function InfoPane() {
         overflow: "auto",
         backgroundColor: "#fafafa",
         borderTop: "2px solid #c0c0c0",
-        whiteSpace: "pre-wrap",
-        wordBreak: "break-word",
       }}
     >
-      {selectedEntry.message}
+      <div style={{ marginBottom: "8px", color: "#444" }}>
+        {`Line ${selectedEntry.lineNumber} | ${selectedEntry.severity}${
+          selectedEntry.component ? ` | ${selectedEntry.component}` : ""
+        }${selectedEntry.timestampDisplay ? ` | ${selectedEntry.timestampDisplay}` : ""}`}
+      </div>
+      <div
+        style={{
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          color: "#111",
+        }}
+      >
+        {selectedEntry.message}
+      </div>
     </div>
   );
 }

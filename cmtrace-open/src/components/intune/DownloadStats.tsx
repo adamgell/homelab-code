@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import type { DownloadStat } from "../../types/intune";
 
 interface DownloadStatsProps {
@@ -5,16 +6,51 @@ interface DownloadStatsProps {
 }
 
 export function DownloadStats({ downloads }: DownloadStatsProps) {
+  const aggregate = useMemo(() => {
+    let success = 0;
+    let failed = 0;
+    let totalBytes = 0;
+
+    for (const download of downloads) {
+      if (download.success) {
+        success += 1;
+      } else {
+        failed += 1;
+      }
+      totalBytes += Math.max(download.sizeBytes, 0);
+    }
+
+    return { success, failed, totalBytes };
+  }, [downloads]);
+
   if (downloads.length === 0) {
     return (
       <div style={{ padding: "20px", color: "#666", textAlign: "center" }}>
-        No download events found in the log.
+        No content download events were found in this analysis.
       </div>
     );
   }
 
   return (
     <div style={{ overflowX: "auto" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: "14px",
+          alignItems: "center",
+          padding: "8px 12px",
+          fontSize: "11px",
+          color: "#4b5563",
+          borderBottom: "1px solid #e5e7eb",
+          backgroundColor: "#f8fafc",
+        }}
+      >
+        <strong>{downloads.length} downloads</strong>
+        <span style={{ color: "#166534" }}>OK: {aggregate.success}</span>
+        <span style={{ color: "#991b1b" }}>Fail: {aggregate.failed}</span>
+        <span>Total: {formatBytes(aggregate.totalBytes)}</span>
+      </div>
+
       <table
         style={{
           width: "100%",
@@ -42,7 +78,7 @@ export function DownloadStats({ downloads }: DownloadStatsProps) {
         <tbody>
           {downloads.map((dl, i) => (
             <tr
-              key={i}
+              key={`${dl.contentId}-${dl.timestamp ?? i}-${i}`}
               style={{
                 borderBottom: "1px solid #e5e7eb",
                 backgroundColor: i % 2 === 0 ? "#fff" : "#f9fafb",
@@ -73,8 +109,7 @@ export function DownloadStats({ downloads }: DownloadStatsProps) {
                         style={{
                           width: `${Math.min(dl.doPercentage, 100)}%`,
                           height: "100%",
-                          backgroundColor:
-                            dl.doPercentage > 50 ? "#22c55e" : "#3b82f6",
+                          backgroundColor: dl.doPercentage > 50 ? "#22c55e" : "#3b82f6",
                           borderRadius: "4px",
                         }}
                       />
@@ -86,9 +121,7 @@ export function DownloadStats({ downloads }: DownloadStatsProps) {
                 )}
               </td>
               <td style={{ ...tdStyle, fontFamily: "'Courier New', monospace" }}>
-                {dl.durationSecs > 0
-                  ? `${dl.durationSecs.toFixed(1)}s`
-                  : "—"}
+                {dl.durationSecs > 0 ? `${dl.durationSecs.toFixed(1)}s` : "—"}
               </td>
               <td style={tdStyle}>
                 <span
@@ -105,9 +138,7 @@ export function DownloadStats({ downloads }: DownloadStatsProps) {
                   {dl.success ? "OK" : "FAIL"}
                 </span>
               </td>
-              <td style={{ ...tdStyle, color: "#6b7280" }}>
-                {dl.timestamp || "—"}
-              </td>
+              <td style={{ ...tdStyle, color: "#6b7280" }}>{dl.timestamp || "—"}</td>
             </tr>
           ))}
         </tbody>

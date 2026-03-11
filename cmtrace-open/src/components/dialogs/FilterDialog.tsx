@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react";
+import { useFilterStore } from "../../stores/filter-store";
 
 export type FilterOp =
   | "Equals"
@@ -19,7 +20,7 @@ export interface FilterClause {
 interface FilterDialogProps {
   isOpen: boolean;
   onClose: () => void;
-  onApply: (clauses: FilterClause[]) => void;
+  onApply: (clauses: FilterClause[]) => Promise<void>;
   currentClauses: FilterClause[];
 }
 
@@ -52,6 +53,9 @@ export function FilterDialog({
   const [clauses, setClauses] = useState<FilterClause[]>([emptyClause()]);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const isFiltering = useFilterStore((s) => s.isFiltering);
+  const filterError = useFilterStore((s) => s.filterError);
+
   useEffect(() => {
     if (isOpen) {
       setClauses(
@@ -65,39 +69,81 @@ export function FilterDialog({
 
   useEffect(() => {
     if (!isOpen) return;
+
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape" && !isFiltering) onClose();
     };
+
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen, onClose]);
+  }, [isFiltering, isOpen, onClose]);
 
   const updateClause = (index: number, updates: Partial<FilterClause>) => {
+    if (isFiltering) {
+      return;
+    }
+
     setClauses((prev) =>
       prev.map((c, i) => (i === index ? { ...c, ...updates } : c))
     );
   };
 
   const addClause = () => {
+    if (isFiltering) {
+      return;
+    }
+
     setClauses((prev) => [...prev, emptyClause()]);
   };
 
   const removeClause = (index: number) => {
+    if (isFiltering) {
+      return;
+    }
+
     setClauses((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const handleApply = () => {
+  const handleApply = async () => {
+    if (isFiltering) {
+      return;
+    }
+
     const validClauses = clauses.filter((c) => c.value.trim() !== "");
-    onApply(validClauses);
-    onClose();
+
+    try {
+      await onApply(validClauses);
+      onClose();
+    } catch {
+      // Error state is handled by filter store and shown in the dialog/status UI.
+    }
   };
 
-  const handleClear = () => {
-    onApply([]);
-    onClose();
+  const handleClear = async () => {
+    if (isFiltering) {
+      return;
+    }
+
+    try {
+      await onApply([]);
+      onClose();
+    } catch {
+      // Error state is handled by filter store and shown in the dialog/status UI.
+    }
   };
 
   if (!isOpen) return null;
+
+  const appliedClauseCount = currentClauses.length;
+  const validDraftClauseCount = clauses.filter((c) => c.value.trim() !== "").length;
+
+  const statusText = isFiltering
+    ? "Applying filter..."
+    : filterError
+      ? `Filter failed: ${filterError}`
+      : appliedClauseCount > 0
+        ? `${appliedClauseCount} clause(s) currently active`
+        : "No filter currently active";
 
   return (
     <div
@@ -115,7 +161,7 @@ export function FilterDialog({
         zIndex: 1000,
       }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && !isFiltering) onClose();
       }}
     >
       <div
@@ -164,6 +210,7 @@ export function FilterDialog({
 
             <select
               value={clause.field}
+              disabled={isFiltering}
               onChange={(e) =>
                 updateClause(index, { field: e.target.value as FilterField })
               }
@@ -178,6 +225,7 @@ export function FilterDialog({
 
             <select
               value={clause.op}
+              disabled={isFiltering}
               onChange={(e) =>
                 updateClause(index, { op: e.target.value as FilterOp })
               }
@@ -194,6 +242,7 @@ export function FilterDialog({
               ref={index === 0 ? inputRef : undefined}
               type="text"
               value={clause.value}
+              disabled={isFiltering}
               onChange={(e) => updateClause(index, { value: e.target.value })}
               placeholder="Value..."
               style={{
@@ -206,6 +255,7 @@ export function FilterDialog({
             {clauses.length > 1 && (
               <button
                 onClick={() => removeClause(index)}
+                disabled={isFiltering}
                 style={{ fontSize: "11px", padding: "1px 4px" }}
                 title="Remove clause"
               >
@@ -217,19 +267,52 @@ export function FilterDialog({
 
         <div
           style={{
+            marginTop: "6px",
+            fontSize: "11px",
+            color: filterError ? "#991b1b" : isFiltering ? "#1d4ed8" : "#555",
+          }}
+        >
+          {statusText}
+          {!isFiltering && !filterError && (
+            <span>{` • Draft clauses ready: ${validDraftClauseCount}`}</span>
+          )}
+        </div>
+
+        <div
+          style={{
             display: "flex",
             gap: "6px",
             justifyContent: "space-between",
             marginTop: "10px",
           }}
         >
-          <button onClick={addClause} style={{ fontSize: "11px" }}>
+          <button onClick={addClause} disabled={isFiltering} style={{ fontSize: "11px" }}>
             + Add Clause
           </button>
           <div style={{ display: "flex", gap: "6px" }}>
-            <button onClick={handleClear}>Clear Filter</button>
-            <button onClick={handleApply}>Apply</button>
-            <button onClick={onClose}>Cancel</button>
+            <button
+              onClick={() => {
+                handleClear().catch((error) => {
+                  console.error("[filter-dialog] clear failed", { error });
+                });
+              }}
+              disabled={isFiltering}
+            >
+              Clear Filter
+            </button>
+            <button
+              onClick={() => {
+                handleApply().catch((error) => {
+                  console.error("[filter-dialog] apply failed", { error });
+                });
+              }}
+              disabled={isFiltering}
+            >
+              {isFiltering ? "Applying..." : "Apply"}
+            </button>
+            <button onClick={onClose} disabled={isFiltering}>
+              Cancel
+            </button>
           </div>
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useMemo } from "react";
+import { useRef, useEffect, useCallback, useMemo, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useLogStore } from "../../stores/log-store";
 import { useUiStore } from "../../stores/ui-store";
@@ -16,14 +16,19 @@ export function LogListView() {
   const showDetails = useUiStore((s) => s.showDetails);
   const filteredIds = useFilterStore((s) => s.filteredIds);
 
-  // Apply filter to entries
+  const [hasKeyboardFocus, setHasKeyboardFocus] = useState(false);
+
   const displayEntries = useMemo(() => {
     if (!filteredIds) return entries;
-    return entries.filter((e) => filteredIds.has(e.id));
+    return entries.filter((entry) => filteredIds.has(entry.id));
   }, [entries, filteredIds]);
 
+  const selectedEntryIndex = useMemo(
+    () => displayEntries.findIndex((entry) => entry.id === selectedId),
+    [displayEntries, selectedId]
+  );
+
   const parentRef = useRef<HTMLDivElement>(null);
-  // Track whether the user is scrolled near the bottom (auto-scroll zone)
   const isAtBottomRef = useRef(true);
 
   const virtualizer = useVirtualizer({
@@ -33,17 +38,20 @@ export function LogListView() {
     overscan: 20,
   });
 
-  // Track scroll position to decide whether to auto-scroll
   const handleScroll = useCallback(() => {
-    const el = parentRef.current;
-    if (!el) return;
-    const threshold = 50; // px from bottom
+    const element = parentRef.current;
+
+    if (!element) {
+      return;
+    }
+
+    const threshold = 50;
     isAtBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
+      element.scrollHeight - element.scrollTop - element.clientHeight < threshold;
   }, []);
 
-  // Auto-scroll to bottom when new entries arrive (only if at bottom and not paused)
   const prevCount = useRef(displayEntries.length);
+
   useEffect(() => {
     if (
       displayEntries.length > prevCount.current &&
@@ -53,17 +61,22 @@ export function LogListView() {
     ) {
       virtualizer.scrollToIndex(displayEntries.length - 1, { align: "end" });
     }
-    prevCount.current = displayEntries.length;
-  }, [displayEntries.length, virtualizer, isPaused]);
 
-  // Scroll to selected entry when it changes (e.g., from Find)
+    prevCount.current = displayEntries.length;
+  }, [displayEntries.length, isPaused, virtualizer]);
+
   useEffect(() => {
-    if (selectedId === null) return;
-    const index = displayEntries.findIndex((e) => e.id === selectedId);
-    if (index >= 0) {
-      virtualizer.scrollToIndex(index, { align: "center" });
+    if (selectedEntryIndex < 0) {
+      return;
     }
-  }, [selectedId, displayEntries, virtualizer]);
+
+    virtualizer.scrollToIndex(selectedEntryIndex, { align: "center" });
+  }, [selectedEntryIndex, virtualizer]);
+
+  const activeRowDomId =
+    selectedEntryIndex >= 0
+      ? `log-list-row-${displayEntries[selectedEntryIndex].id}`
+      : undefined;
 
   return (
     <div
@@ -74,7 +87,6 @@ export function LogListView() {
         overflow: "hidden",
       }}
     >
-      {/* Column headers */}
       <div
         style={{
           display: "flex",
@@ -132,13 +144,22 @@ export function LogListView() {
         )}
       </div>
 
-      {/* Virtualized list */}
       <div
         ref={parentRef}
+        data-log-list="true"
+        role="listbox"
+        tabIndex={0}
+        aria-label="Log entries"
+        aria-activedescendant={activeRowDomId}
         onScroll={handleScroll}
+        onFocus={() => setHasKeyboardFocus(true)}
+        onBlur={() => setHasKeyboardFocus(false)}
+        onMouseDown={() => parentRef.current?.focus()}
         style={{
           flex: 1,
           overflow: "auto",
+          outline: "none",
+          boxShadow: hasKeyboardFocus ? "inset 0 0 0 1px #0078D7" : "none",
         }}
       >
         <div
@@ -150,6 +171,7 @@ export function LogListView() {
         >
           {virtualizer.getVirtualItems().map((virtualRow) => {
             const entry = displayEntries[virtualRow.index];
+
             return (
               <div
                 key={entry.id}
@@ -164,6 +186,7 @@ export function LogListView() {
               >
                 <LogRow
                   entry={entry}
+                  rowDomId={`log-list-row-${entry.id}`}
                   isSelected={entry.id === selectedId}
                   showDetails={showDetails}
                   highlightText={highlightText}

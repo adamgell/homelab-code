@@ -3,8 +3,8 @@
 //! Used when no structured format (CCM, Simple, or Timestamped) is detected.
 //! Each line becomes a LogEntry with text-based severity detection.
 
-use crate::models::log_entry::{LogEntry, LogFormat};
 use super::severity::detect_severity_from_text;
+use crate::models::log_entry::{LogEntry, LogFormat};
 
 /// Parse all lines as plain text.
 pub fn parse_lines(lines: &[&str], file_path: &str) -> (Vec<LogEntry>, u32) {

@@ -48,7 +48,8 @@ impl TailReader {
         let mut file = std::fs::File::open(&self.path)
             .map_err(|e| format!("Failed to open file for tailing: {}", e))?;
 
-        let metadata = file.metadata()
+        let metadata = file
+            .metadata()
             .map_err(|e| format!("Failed to read metadata: {}", e))?;
 
         let file_size = metadata.len();
@@ -140,10 +141,6 @@ pub struct TailSession {
 }
 
 impl TailSession {
-    pub fn is_paused(&self) -> bool {
-        self.paused.load(Ordering::Relaxed)
-    }
-
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
     }
@@ -176,14 +173,8 @@ where
     let watch_path = path.clone();
 
     std::thread::spawn(move || {
-        let mut tail_reader = TailReader::new(
-            path,
-            byte_offset,
-            format,
-            next_id,
-            next_line,
-            date_order,
-        );
+        let mut tail_reader =
+            TailReader::new(path, byte_offset, format, next_id, next_line, date_order);
 
         // Create a channel for notify events
         let (tx, rx) = std::sync::mpsc::channel();
@@ -256,8 +247,5 @@ where
         }
     });
 
-    Ok(TailSession {
-        stop_flag,
-        paused,
-    })
+    Ok(TailSession { stop_flag, paused })
 }

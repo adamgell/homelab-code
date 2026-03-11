@@ -10,8 +10,8 @@
 //! - Check for timestamp patterns (ISO, slash-date, syslog, time-only) → Timestamped
 //! - Otherwise → Plain text
 
-use crate::models::log_entry::LogFormat;
 use super::timestamped::{self, DateOrder};
+use crate::models::log_entry::LogFormat;
 
 /// Result of format detection, including date order for slash-date disambiguation.
 #[derive(Debug, Clone, PartialEq)]

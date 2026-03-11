@@ -1,3 +1,7 @@
+use std::collections::HashSet;
+
+use chrono::NaiveDateTime;
+
 use super::models::{IntuneEvent, IntuneStatus};
 
 /// Sort events chronologically and deduplicate paired events.
@@ -7,13 +11,18 @@ use super::models::{IntuneEvent, IntuneStatus};
 /// 2. Sorting by start_time
 /// 3. Re-assigning sequential IDs
 pub fn build_timeline(events: Vec<IntuneEvent>) -> Vec<IntuneEvent> {
-    let mut timeline = deduplicate_paired(events);
+    let mut timeline = deduplicate_events(events);
 
-    // Sort by start_time (lexicographic on the timestamp strings works for our format)
+    // Sort by parsed timestamp first, then source+line for deterministic ordering.
     timeline.sort_by(|a, b| {
-        let a_time = a.start_time.as_deref().unwrap_or("");
-        let b_time = b.start_time.as_deref().unwrap_or("");
-        a_time.cmp(b_time)
+        let a_time = parsed_event_time(a);
+        let b_time = parsed_event_time(b);
+
+        a_time
+            .cmp(&b_time)
+            .then_with(|| a.source_file.cmp(&b.source_file))
+            .then_with(|| a.line_number.cmp(&b.line_number))
+            .then_with(|| a.name.cmp(&b.name))
     });
 
     // Re-assign sequential IDs
@@ -24,44 +33,90 @@ pub fn build_timeline(events: Vec<IntuneEvent>) -> Vec<IntuneEvent> {
     timeline
 }
 
-/// Remove duplicate events that were consumed during pairing.
-/// When event_tracker pairs a start event with an end event, the end event's
-/// information is merged into the start event. We remove end events that
-/// have the same GUID/type as a paired start event (one that has an end_time).
-fn deduplicate_paired(events: Vec<IntuneEvent>) -> Vec<IntuneEvent> {
-    // Collect GUIDs that have been paired (start event has end_time set)
-    let paired_keys: Vec<(Option<String>, String)> = events
+/// Remove duplicate or already-consumed events before timeline ordering.
+/// This keeps paired start events, drops consumed completion rows when they
+/// still leak through, and removes exact duplicate entries from the same file.
+fn deduplicate_events(events: Vec<IntuneEvent>) -> Vec<IntuneEvent> {
+    let paired_keys: HashSet<(Option<String>, String, String)> = events
         .iter()
         .filter(|e| e.end_time.is_some())
-        .map(|e| (e.guid.clone(), format!("{:?}", e.event_type)))
+        .map(|e| {
+            (
+                e.guid.clone(),
+                format!("{:?}", e.event_type),
+                e.source_file.clone(),
+            )
+        })
         .collect();
+
+    let mut seen_exact: HashSet<(String, u32, String, String, Option<String>, String)> =
+        HashSet::new();
 
     let mut result = Vec::new();
     for event in events {
-        // Keep the event if:
-        // 1. It's a paired start event (has end_time)
-        // 2. It's an unpaired event (no matching paired start)
-        // 3. It has no GUID (can't be deduplicated)
-        if event.end_time.is_some() {
-            // This is a start event that was paired — keep it
-            result.push(event);
-        } else if event.guid.is_none() {
-            // No GUID — can't deduplicate, keep it
-            result.push(event);
-        } else {
-            // Check if this is a "consumed" end event
-            let key = (event.guid.clone(), format!("{:?}", event.event_type));
-            let is_consumed_end = (event.status == IntuneStatus::Success
-                || event.status == IntuneStatus::Failed)
-                && paired_keys.contains(&key);
+        let exact_key = (
+            event.source_file.clone(),
+            event.line_number,
+            format!("{:?}", event.event_type),
+            format!("{:?}", event.status),
+            event.start_time.clone(),
+            event.name.clone(),
+        );
 
-            if !is_consumed_end {
-                result.push(event);
-            }
+        if !seen_exact.insert(exact_key) {
+            continue;
+        }
+
+        if event.end_time.is_some() {
+            result.push(event);
+            continue;
+        }
+
+        if event.guid.is_none() {
+            result.push(event);
+            continue;
+        }
+
+        let key = (
+            event.guid.clone(),
+            format!("{:?}", event.event_type),
+            event.source_file.clone(),
+        );
+        let is_consumed_end = (event.status == IntuneStatus::Success
+            || event.status == IntuneStatus::Failed
+            || event.status == IntuneStatus::Timeout)
+            && paired_keys.contains(&key);
+
+        if !is_consumed_end {
+            result.push(event);
         }
     }
 
     result
+}
+
+fn parsed_event_time(event: &IntuneEvent) -> Option<NaiveDateTime> {
+    event
+        .start_time
+        .as_deref()
+        .and_then(parse_timestamp)
+        .or_else(|| event.end_time.as_deref().and_then(parse_timestamp))
+}
+
+fn parse_timestamp(value: &str) -> Option<NaiveDateTime> {
+    const FORMATS: &[&str] = &[
+        "%m-%d-%Y %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y/%m/%d %H:%M:%S%.f",
+    ];
+
+    for format in FORMATS {
+        if let Ok(parsed) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(parsed);
+        }
+    }
+
+    None
 }
 
 /// Calculate the time span covered by a set of events.
@@ -166,5 +221,63 @@ mod tests {
     fn test_estimate_duration_midnight() {
         let d = estimate_duration_secs("01-01-2024 23:59:00.000", "01-02-2024 00:01:00.000");
         assert_eq!(d, Some(120.0));
+    }
+
+    #[test]
+    fn build_timeline_sorts_by_parsed_timestamp() {
+        let timeline = build_timeline(vec![
+            IntuneEvent {
+                id: 0,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Later".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("12-31-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "later".to_string(),
+                source_file: "b.log".to_string(),
+                line_number: 2,
+            },
+            IntuneEvent {
+                id: 1,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Earlier".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("01-01-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "earlier".to_string(),
+                source_file: "a.log".to_string(),
+                line_number: 1,
+            },
+        ]);
+
+        assert_eq!(timeline[0].name, "Earlier");
+        assert_eq!(timeline[1].name, "Later");
+    }
+
+    #[test]
+    fn build_timeline_deduplicates_exact_duplicate_events() {
+        let event = IntuneEvent {
+            id: 0,
+            event_type: super::super::models::IntuneEventType::Win32App,
+            name: "Duplicate".to_string(),
+            guid: Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string()),
+            status: IntuneStatus::Success,
+            start_time: Some("01-01-2024 10:00:00.000".to_string()),
+            end_time: None,
+            duration_secs: None,
+            error_code: None,
+            detail: "same".to_string(),
+            source_file: "a.log".to_string(),
+            line_number: 1,
+        };
+
+        let timeline = build_timeline(vec![event.clone(), event]);
+        assert_eq!(timeline.len(), 1);
     }
 }

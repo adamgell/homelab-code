@@ -1,5 +1,27 @@
 use serde::{Deserialize, Serialize};
 
+/// Severity level for generated diagnostic guidance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IntuneDiagnosticSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// Deterministic diagnostic guidance derived from Intune analysis results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntuneDiagnosticInsight {
+    pub id: String,
+    pub severity: IntuneDiagnosticSeverity,
+    pub title: String,
+    pub summary: String,
+    pub evidence: Vec<String>,
+    pub next_checks: Vec<String>,
+    #[serde(default)]
+    pub suggested_fixes: Vec<String>,
+}
+
 /// Type of Intune event detected from log analysis.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IntuneEventType {
@@ -87,8 +109,14 @@ pub struct IntuneAnalysisResult {
     pub downloads: Vec<DownloadStat>,
     /// Summary counts
     pub summary: IntuneSummary,
-    /// Source file analyzed
+    /// Deterministic diagnostic guidance.
+    #[serde(default)]
+    pub diagnostics: Vec<IntuneDiagnosticInsight>,
+    /// Source path analyzed (file path or directory path)
     pub source_file: String,
+    /// Expanded source files included in this result.
+    #[serde(default)]
+    pub source_files: Vec<String>,
 }
 
 /// Summary statistics from Intune analysis.
@@ -103,6 +131,11 @@ pub struct IntuneSummary {
     pub succeeded: u32,
     pub failed: u32,
     pub in_progress: u32,
+    pub pending: u32,
+    pub timed_out: u32,
     pub total_downloads: u32,
+    pub successful_downloads: u32,
+    pub failed_downloads: u32,
+    pub failed_scripts: u32,
     pub log_time_span: Option<String>,
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 interface ErrorLookupResult {
@@ -13,15 +13,32 @@ interface ErrorLookupDialogProps {
   onClose: () => void;
 }
 
+function formatLookupError(err: unknown): string {
+  if (typeof err === "string") return err;
+  if (err && typeof err === "object" && "message" in err) {
+    return String((err as { message: unknown }).message);
+  }
+  return "Lookup failed. Please try again.";
+}
+
 export function ErrorLookupDialog({ isOpen, onClose }: ErrorLookupDialogProps) {
   const [input, setInput] = useState("");
   const [result, setResult] = useState<ErrorLookupResult | null>(null);
+  const [isLookingUp, setIsLookingUp] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (isOpen && inputRef.current) {
       inputRef.current.focus();
       inputRef.current.select();
+    }
+
+    if (!isOpen) {
+      setIsLookingUp(false);
+      setLookupError(null);
+      setResult(null);
+      setInput("");
     }
   }, [isOpen]);
 
@@ -35,14 +52,27 @@ export function ErrorLookupDialog({ isOpen, onClose }: ErrorLookupDialogProps) {
   }, [isOpen, onClose]);
 
   const handleLookup = async () => {
-    if (!input.trim()) return;
+    const code = input.trim();
+    if (!code || isLookingUp) {
+      if (!code) {
+        setLookupError("Enter an error code to look up.");
+        setResult(null);
+      }
+      return;
+    }
+
+    setIsLookingUp(true);
+    setLookupError(null);
+    setResult(null);
+
     try {
-      const res = await invoke<ErrorLookupResult>("lookup_error_code", {
-        code: input.trim(),
-      });
+      const res = await invoke<ErrorLookupResult>("lookup_error_code", { code });
       setResult(res);
     } catch (err) {
-      console.error("Lookup failed:", err);
+      console.error("Lookup failed", { code, error: err });
+      setLookupError(formatLookupError(err));
+    } finally {
+      setIsLookingUp(false);
     }
   };
 
@@ -87,17 +117,24 @@ export function ErrorLookupDialog({ isOpen, onClose }: ErrorLookupDialogProps) {
           Error Lookup
         </div>
 
-        <div style={{ display: "flex", gap: "6px", marginBottom: "10px" }}>
-          <label style={{ fontSize: "12px", lineHeight: "24px" }}>
+        <div style={{ display: "flex", gap: "6px", marginBottom: "8px" }}>
+          <label htmlFor="error-code-input" style={{ fontSize: "12px", lineHeight: "24px" }}>
             Error code:
           </label>
           <input
+            id="error-code-input"
             ref={inputRef}
             type="text"
             value={input}
-            onChange={(e) => setInput(e.target.value)}
+            onChange={(e) => {
+              setInput(e.target.value);
+              setLookupError(null);
+            }}
             onKeyDown={(e) => {
-              if (e.key === "Enter") handleLookup();
+              if (e.key === "Enter") {
+                e.preventDefault();
+                void handleLookup();
+              }
             }}
             placeholder="0x80070005 or -2147024891"
             style={{
@@ -106,8 +143,18 @@ export function ErrorLookupDialog({ isOpen, onClose }: ErrorLookupDialogProps) {
               padding: "2px 4px",
               fontFamily: "'Courier New', monospace",
             }}
+            disabled={isLookingUp}
           />
-          <button onClick={handleLookup}>Lookup</button>
+          <button onClick={() => void handleLookup()} disabled={isLookingUp}>
+            {isLookingUp ? "Looking up..." : "Lookup"}
+          </button>
+        </div>
+
+        <div aria-live="polite" style={{ minHeight: "18px", marginBottom: "8px" }}>
+          {isLookingUp && <span style={{ fontSize: "11px", color: "#555" }}>Searching known error codes...</span>}
+          {!isLookingUp && lookupError && (
+            <span style={{ fontSize: "11px", color: "#a40000" }}>{lookupError}</span>
+          )}
         </div>
 
         {result && (
@@ -135,10 +182,11 @@ export function ErrorLookupDialog({ isOpen, onClose }: ErrorLookupDialogProps) {
             <div
               style={{
                 marginTop: "6px",
-                color: result.found ? "#000" : "#999",
+                color: result.found ? "#000" : "#666",
               }}
             >
-              <strong>Description:</strong> {result.description}
+              <strong>{result.found ? "Description:" : "Not found:"}</strong>{" "}
+              {result.description}
             </div>
           </div>
         )}

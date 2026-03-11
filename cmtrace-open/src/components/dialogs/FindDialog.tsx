@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useEffect, useRef } from "react";
 import { useLogStore } from "../../stores/log-store";
 
 interface FindDialogProps {
@@ -7,14 +7,15 @@ interface FindDialogProps {
 }
 
 export function FindDialog({ isOpen, onClose }: FindDialogProps) {
-  const [searchText, setSearchText] = useState("");
-  const [caseSensitive, setCaseSensitive] = useState(false);
-  const [statusText, setStatusText] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const entries = useLogStore((s) => s.entries);
-  const selectedId = useLogStore((s) => s.selectedId);
-  const selectEntry = useLogStore((s) => s.selectEntry);
+  const searchText = useLogStore((s) => s.findQuery);
+  const caseSensitive = useLogStore((s) => s.findCaseSensitive);
+  const statusText = useLogStore((s) => s.findStatusText);
+  const setFindQuery = useLogStore((s) => s.setFindQuery);
+  const setFindCaseSensitive = useLogStore((s) => s.setFindCaseSensitive);
+  const findNext = useLogStore((s) => s.findNext);
+  const findPrevious = useLogStore((s) => s.findPrevious);
 
   useEffect(() => {
     if (isOpen && inputRef.current) {
@@ -23,73 +24,36 @@ export function FindDialog({ isOpen, onClose }: FindDialogProps) {
     }
   }, [isOpen]);
 
-  const doFind = useCallback(
-    (forward: boolean) => {
-      if (!searchText || entries.length === 0) return;
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
 
-      // Find current selected index
-      let startIndex = -1;
-      if (selectedId !== null) {
-        startIndex = entries.findIndex((e) => e.id === selectedId);
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onClose();
+        return;
       }
 
-      const count = entries.length;
-      const searchLower = caseSensitive ? searchText : searchText.toLowerCase();
+      if (event.key === "Enter" || event.key === "F3") {
+        event.preventDefault();
 
-      let current = forward
-        ? (startIndex + 1) % count
-        : startIndex <= 0
-          ? count - 1
-          : startIndex - 1;
-
-      let wrapped = false;
-
-      for (let i = 0; i < count; i++) {
-        const entry = entries[current];
-        const message = caseSensitive
-          ? entry.message
-          : entry.message.toLowerCase();
-
-        if (message.includes(searchLower)) {
-          selectEntry(entry.id);
-          setStatusText(
-            wrapped ? `Found (wrapped) at line ${entry.lineNumber}` : ""
-          );
+        if (event.shiftKey) {
+          findPrevious("find-dialog.keyboard");
           return;
         }
 
-        if (forward) {
-          current = (current + 1) % count;
-          if (current === 0) wrapped = true;
-        } else {
-          current = current <= 0 ? count - 1 : current - 1;
-          if (current === count - 1) wrapped = true;
-        }
-      }
-
-      setStatusText("Not found");
-    },
-    [searchText, caseSensitive, entries, selectedId, selectEntry]
-  );
-
-  // Handle keyboard shortcuts
-  useEffect(() => {
-    if (!isOpen) return;
-
-    const handleKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-      } else if (e.key === "Enter" || e.key === "F3") {
-        e.preventDefault();
-        doFind(!e.shiftKey);
+        findNext("find-dialog.keyboard");
       }
     };
 
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [isOpen, onClose, doFind]);
+  }, [findNext, findPrevious, isOpen, onClose]);
 
-  if (!isOpen) return null;
+  if (!isOpen) {
+    return null;
+  }
 
   return (
     <div
@@ -106,8 +70,10 @@ export function FindDialog({ isOpen, onClose }: FindDialogProps) {
         paddingTop: "80px",
         zIndex: 1000,
       }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
+      onClick={(event) => {
+        if (event.target === event.currentTarget) {
+          onClose();
+        }
       }}
     >
       <div
@@ -138,10 +104,7 @@ export function FindDialog({ isOpen, onClose }: FindDialogProps) {
             ref={inputRef}
             type="text"
             value={searchText}
-            onChange={(e) => {
-              setSearchText(e.target.value);
-              setStatusText("");
-            }}
+            onChange={(event) => setFindQuery(event.target.value)}
             style={{
               flex: 1,
               fontSize: "12px",
@@ -155,7 +118,7 @@ export function FindDialog({ isOpen, onClose }: FindDialogProps) {
             <input
               type="checkbox"
               checked={caseSensitive}
-              onChange={(e) => setCaseSensitive(e.target.checked)}
+              onChange={(event) => setFindCaseSensitive(event.target.checked)}
             />
             Match case
           </label>
@@ -165,8 +128,8 @@ export function FindDialog({ isOpen, onClose }: FindDialogProps) {
         </div>
 
         <div style={{ display: "flex", gap: "6px", justifyContent: "flex-end" }}>
-          <button onClick={() => doFind(false)}>Find Previous</button>
-          <button onClick={() => doFind(true)}>Find Next</button>
+          <button onClick={() => findPrevious("find-dialog.button.previous")}>Find Previous</button>
+          <button onClick={() => findNext("find-dialog.button.next")}>Find Next</button>
           <button onClick={onClose}>Close</button>
         </div>
       </div>

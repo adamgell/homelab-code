@@ -3,6 +3,7 @@ import { COLORS } from "../../lib/constants";
 
 interface LogRowProps {
   entry: LogEntry;
+  rowDomId: string;
   isSelected: boolean;
   showDetails: boolean;
   highlightText: string;
@@ -12,23 +13,31 @@ interface LogRowProps {
 
 function getRowStyle(entry: LogEntry, isSelected: boolean) {
   if (isSelected) {
-    return { backgroundColor: "#0078D7", color: "#FFFFFF" };
+    return {
+      backgroundColor: "#0078D7",
+      color: "#FFFFFF",
+      borderLeft: "3px solid #FFFFFF",
+    };
   }
+
   switch (entry.severity) {
     case "Error":
       return {
         backgroundColor: COLORS.error.background,
         color: COLORS.error.text,
+        borderLeft: "3px solid transparent",
       };
     case "Warning":
       return {
         backgroundColor: COLORS.warning.background,
         color: COLORS.warning.text,
+        borderLeft: "3px solid transparent",
       };
     default:
       return {
         backgroundColor: COLORS.info.background,
         color: COLORS.info.text,
+        borderLeft: "3px solid transparent",
       };
   }
 }
@@ -49,22 +58,28 @@ function highlightMessage(
     const isMatch = caseSensitive
       ? part === highlight
       : part.toLowerCase() === highlight.toLowerCase();
+
     if (isMatch) {
       return (
         <mark
           key={i}
-          style={{ backgroundColor: COLORS.highlightDefault, color: "#000" }}
+          style={{
+            backgroundColor: COLORS.highlightDefault,
+            color: "#000",
+          }}
         >
           {part}
         </mark>
       );
     }
+
     return part;
   });
 }
 
 export function LogRow({
   entry,
+  rowDomId,
   isSelected,
   showDetails,
   highlightText,
@@ -75,6 +90,10 @@ export function LogRow({
 
   return (
     <div
+      id={rowDomId}
+      role="option"
+      aria-selected={isSelected}
+      data-selected={isSelected}
       className="log-row"
       style={{
         ...style,
@@ -85,6 +104,7 @@ export function LogRow({
         fontFamily: "'Segoe UI', Tahoma, sans-serif",
         lineHeight: "20px",
         whiteSpace: "nowrap",
+        transition: "filter 80ms linear",
       }}
       onClick={() => onClick(entry.id)}
     >

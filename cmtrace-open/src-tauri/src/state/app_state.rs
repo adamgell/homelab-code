@@ -6,6 +6,7 @@ use crate::models::log_entry::{LogEntry, LogFormat};
 use crate::parser::timestamped::DateOrder;
 use crate::watcher::tail::TailSession;
 
+#[allow(dead_code)]
 /// Represents a currently open log file.
 pub struct OpenFile {
     pub path: PathBuf,

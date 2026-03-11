@@ -1,8 +1,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::models::log_entry::{LogEntry, LogFormat};
 use super::severity::detect_severity_from_text;
+use crate::models::log_entry::{LogEntry, LogFormat};
 
 /// Controls whether slash-date fields are interpreted as MM/DD or DD/MM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -28,8 +28,9 @@ static ISO_RE: Lazy<Regex> = Lazy::new(|| {
 /// Slash-date: 01/15/2024 14:30:00.123 or 1/15/2024 2:30:00 PM
 static SLASH_DATE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"^(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})(\.\d+)?(\s*[AaPp][Mm])?\s+(.*)"
-    ).unwrap()
+        r"^(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})(\.\d+)?(\s*[AaPp][Mm])?\s+(.*)",
+    )
+    .unwrap()
 });
 
 /// Syslog: Jan 15 14:30:00 hostname ...
@@ -40,11 +41,8 @@ static SYSLOG_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Time-only: 14:30:00.123 message...
-static TIME_ONLY_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"^(\d{2}):(\d{2}):(\d{2})([.,]\d+)?\s+(.*)"
-    ).unwrap()
-});
+static TIME_ONLY_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^(\d{2}):(\d{2}):(\d{2})([.,]\d+)?\s+(.*)").unwrap());
 
 // ---------------------------------------------------------------------------
 // Public API — matches same pattern as ccm/simple/plain parsers
@@ -123,9 +121,9 @@ pub fn matches_any_timestamp(line: &str) -> bool {
 
 /// Check whether a slash-date line has first field > 12, indicating day-first order.
 pub fn slash_date_first_field(line: &str) -> Option<u32> {
-    SLASH_DATE_RE.captures(line).and_then(|caps| {
-        caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok())
-    })
+    SLASH_DATE_RE
+        .captures(line)
+        .and_then(|caps| caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok()))
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +142,10 @@ fn try_iso(line: &str) -> Option<LogEntry> {
 
     let ms = parse_fractional_millis(caps.get(7).map(|m| m.as_str()));
     let tz_offset = parse_tz_offset(caps.get(8).map(|m| m.as_str()));
-    let message = caps.get(9).map(|m| m.as_str().to_string()).unwrap_or_default();
+    let message = caps
+        .get(9)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
 
     let timestamp = chrono::NaiveDate::from_ymd_opt(yr, mon, day)
         .and_then(|d| d.and_hms_milli_opt(h, m, s, ms))
@@ -202,7 +203,10 @@ fn try_slash_date(line: &str, date_order: DateOrder) -> Option<LogEntry> {
         }
     }
 
-    let message = caps.get(9).map(|m| m.as_str().to_string()).unwrap_or_default();
+    let message = caps
+        .get(9)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
 
     let timestamp = chrono::NaiveDate::from_ymd_opt(yr, mon, day)
         .and_then(|d| d.and_hms_milli_opt(h, m, s, ms))
@@ -240,10 +244,17 @@ fn try_syslog(line: &str) -> Option<LogEntry> {
     let h: u32 = caps.get(3)?.as_str().parse().ok()?;
     let m: u32 = caps.get(4)?.as_str().parse().ok()?;
     let s: u32 = caps.get(5)?.as_str().parse().ok()?;
-    let message = caps.get(6).map(|m| m.as_str().to_string()).unwrap_or_default();
+    let message = caps
+        .get(6)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
 
     let mon = month_name_to_number(month_str)?;
-    let yr = chrono::Local::now().format("%Y").to_string().parse::<i32>().unwrap_or(2024);
+    let yr = chrono::Local::now()
+        .format("%Y")
+        .to_string()
+        .parse::<i32>()
+        .unwrap_or(2024);
 
     let timestamp = chrono::NaiveDate::from_ymd_opt(yr, mon, day)
         .and_then(|d| d.and_hms_opt(h, m, s))
@@ -280,7 +291,10 @@ fn try_time_only(line: &str) -> Option<LogEntry> {
     let m: u32 = caps.get(2)?.as_str().parse().ok()?;
     let s: u32 = caps.get(3)?.as_str().parse().ok()?;
     let ms = parse_fractional_millis(caps.get(4).map(|m| m.as_str()));
-    let message = caps.get(5).map(|m| m.as_str().to_string()).unwrap_or_default();
+    let message = caps
+        .get(5)
+        .map(|m| m.as_str().to_string())
+        .unwrap_or_default();
 
     // Validate time values
     if h >= 24 || m >= 60 || s >= 60 {
@@ -372,8 +386,15 @@ mod tests {
 
     #[test]
     fn test_iso_with_z() {
-        let entry = parse_line("2024-01-15T14:30:00.123Z Error: connection refused", DateOrder::MonthFirst).unwrap();
-        assert_eq!(entry.timestamp_display.as_deref(), Some("2024-01-15 14:30:00.123"));
+        let entry = parse_line(
+            "2024-01-15T14:30:00.123Z Error: connection refused",
+            DateOrder::MonthFirst,
+        )
+        .unwrap();
+        assert_eq!(
+            entry.timestamp_display.as_deref(),
+            Some("2024-01-15 14:30:00.123")
+        );
         assert!(entry.message.contains("connection refused"));
         assert_eq!(entry.severity, Severity::Error);
         assert_eq!(entry.timezone_offset, Some(0));
@@ -381,46 +402,86 @@ mod tests {
 
     #[test]
     fn test_iso_with_offset() {
-        let entry = parse_line("2024-01-15T14:30:00.000+05:30 Starting service", DateOrder::MonthFirst).unwrap();
+        let entry = parse_line(
+            "2024-01-15T14:30:00.000+05:30 Starting service",
+            DateOrder::MonthFirst,
+        )
+        .unwrap();
         assert_eq!(entry.timezone_offset, Some(330));
         assert_eq!(entry.severity, Severity::Info);
     }
 
     #[test]
     fn test_iso_space_separator() {
-        let entry = parse_line("2024-01-15 14:30:00,456 WARNING: disk space low", DateOrder::MonthFirst).unwrap();
-        assert_eq!(entry.timestamp_display.as_deref(), Some("2024-01-15 14:30:00.456"));
+        let entry = parse_line(
+            "2024-01-15 14:30:00,456 WARNING: disk space low",
+            DateOrder::MonthFirst,
+        )
+        .unwrap();
+        assert_eq!(
+            entry.timestamp_display.as_deref(),
+            Some("2024-01-15 14:30:00.456")
+        );
         assert_eq!(entry.severity, Severity::Warning);
     }
 
     #[test]
     fn test_iso_no_fractional() {
         let entry = parse_line("2024-01-15T14:30:00 Ready", DateOrder::MonthFirst).unwrap();
-        assert_eq!(entry.timestamp_display.as_deref(), Some("2024-01-15 14:30:00.000"));
+        assert_eq!(
+            entry.timestamp_display.as_deref(),
+            Some("2024-01-15 14:30:00.000")
+        );
     }
 
     #[test]
     fn test_us_date() {
-        let entry = parse_line("01/15/2024 14:30:00 Processing request", DateOrder::MonthFirst).unwrap();
-        assert_eq!(entry.timestamp_display.as_deref(), Some("2024-01-15 14:30:00.000"));
+        let entry = parse_line(
+            "01/15/2024 14:30:00 Processing request",
+            DateOrder::MonthFirst,
+        )
+        .unwrap();
+        assert_eq!(
+            entry.timestamp_display.as_deref(),
+            Some("2024-01-15 14:30:00.000")
+        );
     }
 
     #[test]
     fn test_us_date_with_ampm() {
-        let entry = parse_line("1/15/2024 2:30:00 PM Task completed", DateOrder::MonthFirst).unwrap();
-        assert_eq!(entry.timestamp_display.as_deref(), Some("2024-01-15 14:30:00.000"));
+        let entry =
+            parse_line("1/15/2024 2:30:00 PM Task completed", DateOrder::MonthFirst).unwrap();
+        assert_eq!(
+            entry.timestamp_display.as_deref(),
+            Some("2024-01-15 14:30:00.000")
+        );
     }
 
     #[test]
     fn test_eu_date() {
-        let entry = parse_line("15/01/2024 14:30:00 Processing request", DateOrder::DayFirst).unwrap();
-        assert_eq!(entry.timestamp_display.as_deref(), Some("2024-01-15 14:30:00.000"));
+        let entry = parse_line(
+            "15/01/2024 14:30:00 Processing request",
+            DateOrder::DayFirst,
+        )
+        .unwrap();
+        assert_eq!(
+            entry.timestamp_display.as_deref(),
+            Some("2024-01-15 14:30:00.000")
+        );
     }
 
     #[test]
     fn test_syslog() {
-        let entry = parse_line("Jan 15 14:30:00 myhost kernel: NIC Link is Up", DateOrder::MonthFirst).unwrap();
-        assert!(entry.timestamp_display.as_deref().unwrap().contains("14:30:00"));
+        let entry = parse_line(
+            "Jan 15 14:30:00 myhost kernel: NIC Link is Up",
+            DateOrder::MonthFirst,
+        )
+        .unwrap();
+        assert!(entry
+            .timestamp_display
+            .as_deref()
+            .unwrap()
+            .contains("14:30:00"));
         assert!(entry.message.contains("myhost"));
         assert_eq!(entry.format, LogFormat::Timestamped);
     }
@@ -439,9 +500,16 @@ mod tests {
 
     #[test]
     fn test_am_midnight() {
-        let entry = parse_line("1/15/2024 12:30:00 AM Midnight event", DateOrder::MonthFirst).unwrap();
+        let entry = parse_line(
+            "1/15/2024 12:30:00 AM Midnight event",
+            DateOrder::MonthFirst,
+        )
+        .unwrap();
         // 12 AM = 0 hours
-        assert_eq!(entry.timestamp_display.as_deref(), Some("2024-01-15 00:30:00.000"));
+        assert_eq!(
+            entry.timestamp_display.as_deref(),
+            Some("2024-01-15 00:30:00.000")
+        );
     }
 
     #[test]

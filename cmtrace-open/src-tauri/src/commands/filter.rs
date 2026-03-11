@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::models::log_entry::LogEntry;
+use serde::{Deserialize, Serialize};
 
 /// The types of filter clause operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,9 +46,7 @@ pub fn apply_filter(
 
     let matching_ids: Vec<u64> = entries
         .iter()
-        .filter(|entry| {
-            clauses.iter().all(|clause| matches_clause(entry, clause))
-        })
+        .filter(|entry| clauses.iter().all(|clause| matches_clause(entry, clause)))
         .map(|entry| entry.id)
         .collect();
 
@@ -63,10 +61,7 @@ fn matches_clause(entry: &LogEntry, clause: &FilterClause) -> bool {
             match_string(comp, &clause.op, &clause.value)
         }
         FilterField::Thread => {
-            let thread_str = entry
-                .thread
-                .map(|t| t.to_string())
-                .unwrap_or_default();
+            let thread_str = entry.thread.map(|t| t.to_string()).unwrap_or_default();
             match_string(&thread_str, &clause.op, &clause.value)
         }
         FilterField::Timestamp => {

@@ -10,15 +10,13 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::models::log_entry::{LogEntry, LogFormat, Severity};
 use super::severity::detect_severity_from_text;
+use crate::models::log_entry::{LogEntry, LogFormat, Severity};
 
 /// Regex for the timestamp portion: <MM-dd-yyyy HH:mm:ss.fff±TTTTT>
 static TIMESTAMP_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r#"<(\d{1,2})-(\d{1,2})-(\d{4})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})\.(\d+)([+-]?\d+)>"#,
-    )
-    .expect("Simple timestamp regex must compile")
+    Regex::new(r#"<(\d{1,2})-(\d{1,2})-(\d{4})\s+(\d{1,2}):(\d{1,2}):(\d{1,2})\.(\d+)([+-]?\d+)>"#)
+        .expect("Simple timestamp regex must compile")
 });
 
 /// Regex for the thread portion: <thread=N (0xNNNN)> or <thread=N>

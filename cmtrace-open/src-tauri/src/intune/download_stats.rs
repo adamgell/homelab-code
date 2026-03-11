@@ -1,5 +1,6 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
+use std::path::Path;
 
 use super::ime_parser::ImeLine;
 use super::models::DownloadStat;
@@ -8,13 +9,15 @@ use super::models::DownloadStat;
 
 /// Matches content download start/progress/completion messages
 static DOWNLOAD_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:download|downloading|content\s+download)"#).unwrap()
+    Regex::new(
+        r#"(?i)(?:download|downloading|content\s+download|delivery\s+optimization|bytes\s+downloaded|staging\s+(?:file|content)|hash\s+validation|content\s+cached)"#,
+    )
+    .unwrap()
 });
 
 /// Extracts content size in bytes from messages like "Content size: 12345678 bytes"
-static SIZE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:content\s+)?size[:\s]+(\d+)\s*(?:bytes|KB|MB|GB)"#).unwrap()
-});
+static SIZE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)(?:content\s+)?size[:\s]+(\d+)\s*(?:bytes|KB|MB|GB)"#).unwrap());
 
 /// Extracts download speed from messages
 static SPEED_RE: Lazy<Regex> = Lazy::new(|| {
@@ -23,9 +26,8 @@ static SPEED_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Extracts Delivery Optimization percentage
-static DO_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:delivery\s+optimization|DO)[:\s]+([\d.]+)\s*%"#).unwrap()
-});
+static DO_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)(?:delivery\s+optimization|DO)[:\s]+([\d.]+)\s*%"#).unwrap());
 
 /// Extracts content/app ID (GUID) from download messages
 static CONTENT_ID_RE: Lazy<Regex> = Lazy::new(|| {
@@ -33,14 +35,18 @@ static CONTENT_ID_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Matches download completion messages
-static DOWNLOAD_COMPLETE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)download\s+(?:completed|finished|succeeded|done)"#).unwrap()
-});
+static DOWNLOAD_COMPLETE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)download\s+(?:completed|finished|succeeded|done)"#).unwrap());
 
 /// Matches download failure messages
-static DOWNLOAD_FAILED_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)download\s+(?:failed|error|timed?\s*out)"#).unwrap()
+static DOWNLOAD_FAILED_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)download\s+(?:failed|error|timed?\s*out)"#).unwrap());
+static DOWNLOAD_START_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:starting|beginning|queued|requesting).*(?:download|content\s+download)"#)
+        .unwrap()
 });
+static APPWORKLOAD_RETRY_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)(?:retry|retrying|reattempt|will\s+retry)"#).unwrap());
 
 /// Extracts duration from messages like "Duration: 45 seconds" or "took 2.5s"
 static DURATION_RE: Lazy<Regex> = Lazy::new(|| {
@@ -48,9 +54,14 @@ static DURATION_RE: Lazy<Regex> = Lazy::new(|| {
 });
 
 /// Extract download statistics from parsed IME log lines.
-pub fn extract_downloads(lines: &[ImeLine]) -> Vec<DownloadStat> {
+pub fn extract_downloads(lines: &[ImeLine], source_file: &str) -> Vec<DownloadStat> {
     let mut downloads: Vec<DownloadStat> = Vec::new();
     let mut current_download: Option<PartialDownload> = None;
+    let source_kind = classify_download_source(source_file);
+
+    if source_kind == DownloadSourceKind::Unsupported {
+        return downloads;
+    }
 
     for line in lines {
         let msg = &line.message;
@@ -82,6 +93,19 @@ pub fn extract_downloads(lines: &[ImeLine]) -> Vec<DownloadStat> {
             continue;
         }
 
+        if APPWORKLOAD_RETRY_RE.is_match(msg) {
+            if let Some(stat) = finalize_download(
+                current_download.take(),
+                content_id.clone(),
+                msg,
+                line.timestamp.as_deref(),
+                false,
+            ) {
+                downloads.push(stat);
+            }
+            continue;
+        }
+
         // Start or update a download tracking entry
         let download = current_download.get_or_insert_with(|| PartialDownload {
             content_id: content_id.clone(),
@@ -91,6 +115,10 @@ pub fn extract_downloads(lines: &[ImeLine]) -> Vec<DownloadStat> {
             do_percentage: None,
             duration_secs: None,
         });
+
+        if DOWNLOAD_START_RE.is_match(msg) && download.start_time.is_none() {
+            download.start_time = line.timestamp.clone();
+        }
 
         // Update content ID if we found one
         if content_id.is_some() && download.content_id.is_none() {
@@ -185,6 +213,28 @@ struct PartialDownload {
     duration_secs: Option<f64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadSourceKind {
+    PrimaryIme,
+    AppWorkload,
+    Unsupported,
+}
+
+fn classify_download_source(source_file: &str) -> DownloadSourceKind {
+    let file_name = Path::new(source_file)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| source_file.to_ascii_lowercase());
+
+    if file_name.contains("appworkload") {
+        DownloadSourceKind::AppWorkload
+    } else if file_name.contains("intunemanagementextension") {
+        DownloadSourceKind::PrimaryIme
+    } else {
+        DownloadSourceKind::Unsupported
+    }
+}
+
 /// Finalize a partial download into a DownloadStat.
 fn finalize_download(
     partial: Option<PartialDownload>,
@@ -270,10 +320,32 @@ mod tests {
             },
         ];
 
-        let downloads = extract_downloads(&lines);
+        let downloads = extract_downloads(&lines, "C:/Logs/AppWorkload.log");
         assert_eq!(downloads.len(), 1);
         assert!(downloads[0].success);
         assert_eq!(downloads[0].size_bytes, 5242880);
+    }
+
+    #[test]
+    fn test_download_retry_creates_failed_attempt() {
+        let lines = vec![
+            ImeLine {
+                line_number: 1,
+                timestamp: Some("01-15-2024 10:00:00.000".to_string()),
+                message: "Starting content download for app id: a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string(),
+                component: None,
+            },
+            ImeLine {
+                line_number: 2,
+                timestamp: Some("01-15-2024 10:00:05.000".to_string()),
+                message: "Download failed, retrying content download for app id: a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string(),
+                component: None,
+            },
+        ];
+
+        let downloads = extract_downloads(&lines, "C:/Logs/AppWorkload.log");
+        assert_eq!(downloads.len(), 1);
+        assert!(!downloads[0].success);
     }
 
     #[test]
