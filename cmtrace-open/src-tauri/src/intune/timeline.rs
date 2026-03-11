@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use chrono::NaiveDateTime;
 
-use super::models::{IntuneEvent, IntuneStatus};
+use super::models::{IntuneEvent, IntuneStatus, IntuneTimestampBounds};
 
 /// Sort events chronologically and deduplicate paired events.
 /// After `event_tracker::extract_events` has already paired start/end events,
@@ -103,7 +103,7 @@ fn parsed_event_time(event: &IntuneEvent) -> Option<NaiveDateTime> {
         .or_else(|| event.end_time.as_deref().and_then(parse_timestamp))
 }
 
-fn parse_timestamp(value: &str) -> Option<NaiveDateTime> {
+pub fn parse_timestamp(value: &str) -> Option<NaiveDateTime> {
     const FORMATS: &[&str] = &[
         "%m-%d-%Y %H:%M:%S%.f",
         "%Y-%m-%d %H:%M:%S%.f",
@@ -119,45 +119,68 @@ fn parse_timestamp(value: &str) -> Option<NaiveDateTime> {
     None
 }
 
-/// Calculate the time span covered by a set of events.
-/// Returns a human-readable string like "2h 15m 30s".
-pub fn calculate_time_span(events: &[IntuneEvent]) -> Option<String> {
-    if events.is_empty() {
-        return None;
-    }
-
-    let mut earliest: Option<&str> = None;
-    let mut latest: Option<&str> = None;
+pub fn calculate_timestamp_bounds(events: &[IntuneEvent]) -> Option<IntuneTimestampBounds> {
+    let mut earliest: Option<(NaiveDateTime, String)> = None;
+    let mut latest: Option<(NaiveDateTime, String)> = None;
 
     for event in events {
-        if let Some(ref t) = event.start_time {
-            match earliest {
-                None => earliest = Some(t.as_str()),
-                Some(e) if t.as_str() < e => earliest = Some(t.as_str()),
-                _ => {}
-            }
+        if let Some(timestamp) = event.start_time.as_deref() {
+            update_timestamp_bounds(&mut earliest, &mut latest, timestamp);
         }
-        // Check end_time too for latest
-        let end = event.end_time.as_deref().or(event.start_time.as_deref());
-        if let Some(t) = end {
-            match latest {
-                None => latest = Some(t),
-                Some(l) if t > l => latest = Some(t),
-                _ => {}
-            }
+
+        if let Some(timestamp) = event.end_time.as_deref() {
+            update_timestamp_bounds(&mut earliest, &mut latest, timestamp);
         }
     }
 
     match (earliest, latest) {
-        (Some(start), Some(end)) => {
-            let duration = estimate_duration_secs(start, end)?;
-            Some(format_duration(duration))
-        }
+        (Some((_, first_timestamp)), Some((_, last_timestamp))) => Some(IntuneTimestampBounds {
+            first_timestamp: Some(first_timestamp),
+            last_timestamp: Some(last_timestamp),
+        }),
         _ => None,
     }
 }
 
+fn update_timestamp_bounds(
+    earliest: &mut Option<(NaiveDateTime, String)>,
+    latest: &mut Option<(NaiveDateTime, String)>,
+    value: &str,
+) {
+    let Some(parsed) = parse_timestamp(value) else {
+        return;
+    };
+
+    match earliest {
+        Some((current, current_raw))
+            if parsed > *current || (parsed == *current && value >= current_raw.as_str()) => {}
+        _ => *earliest = Some((parsed, value.to_string())),
+    }
+
+    match latest {
+        Some((current, current_raw))
+            if parsed < *current || (parsed == *current && value <= current_raw.as_str()) => {}
+        _ => *latest = Some((parsed, value.to_string())),
+    }
+}
+
+/// Calculate the time span covered by a set of events.
+/// Returns a human-readable string like "2h 15m 30s".
+pub fn calculate_time_span(events: &[IntuneEvent]) -> Option<String> {
+    let bounds = calculate_timestamp_bounds(events)?;
+    let start = parse_timestamp(bounds.first_timestamp.as_deref()?)?;
+    let end = parse_timestamp(bounds.last_timestamp.as_deref()?)?;
+    let duration = end.signed_duration_since(start).num_milliseconds() as f64 / 1000.0;
+
+    if duration < 0.0 {
+        None
+    } else {
+        Some(format_duration(duration))
+    }
+}
+
 /// Estimate duration between two timestamp strings in seconds.
+#[cfg(test)]
 fn estimate_duration_secs(start: &str, end: &str) -> Option<f64> {
     let parse_seconds = |ts: &str| -> Option<f64> {
         let time_part = ts.split_whitespace().last()?;
@@ -221,6 +244,80 @@ mod tests {
     fn test_estimate_duration_midnight() {
         let d = estimate_duration_secs("01-01-2024 23:59:00.000", "01-02-2024 00:01:00.000");
         assert_eq!(d, Some(120.0));
+    }
+
+    #[test]
+    fn calculate_timestamp_bounds_prefers_parsed_order() {
+        let bounds = calculate_timestamp_bounds(&[
+            IntuneEvent {
+                id: 0,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Later".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("12-31-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "later".to_string(),
+                source_file: "b.log".to_string(),
+                line_number: 2,
+            },
+            IntuneEvent {
+                id: 1,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Earlier".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("01-01-2024 10:00:00.000".to_string()),
+                end_time: Some("01-01-2024 10:05:00.000".to_string()),
+                duration_secs: None,
+                error_code: None,
+                detail: "earlier".to_string(),
+                source_file: "a.log".to_string(),
+                line_number: 1,
+            },
+        ])
+        .expect("timestamp bounds");
+
+        assert_eq!(bounds.first_timestamp.as_deref(), Some("01-01-2024 10:00:00.000"));
+        assert_eq!(bounds.last_timestamp.as_deref(), Some("12-31-2024 10:00:00.000"));
+    }
+
+    #[test]
+    fn calculate_time_span_uses_parsed_dates() {
+        let events = vec![
+            IntuneEvent {
+                id: 0,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Later".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("12-31-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "later".to_string(),
+                source_file: "b.log".to_string(),
+                line_number: 2,
+            },
+            IntuneEvent {
+                id: 1,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Earlier".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("01-01-2024 10:00:00.000".to_string()),
+                end_time: Some("01-01-2024 10:05:00.000".to_string()),
+                duration_secs: None,
+                error_code: None,
+                detail: "earlier".to_string(),
+                source_file: "a.log".to_string(),
+                line_number: 1,
+            },
+        ];
+
+        assert_eq!(calculate_time_span(&events), Some("8760h 0m 0s".to_string()));
     }
 
     #[test]

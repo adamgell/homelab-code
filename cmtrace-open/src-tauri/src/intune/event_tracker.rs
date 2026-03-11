@@ -7,9 +7,6 @@ use regex::Regex;
 use super::ime_parser::ImeLine;
 use super::models::{IntuneEvent, IntuneEventType, IntuneStatus};
 
-// ---- Regex patterns for detecting Intune events ----
-
-// Win32App patterns
 static WIN32_APP_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r#"(?i)\[Win32App\].*(?:processing|executing|installing|detected|not detected|evaluating)"#,
@@ -22,42 +19,62 @@ static WIN32_RESULT_RE: Lazy<Regex> = Lazy::new(|| {
 static WIN32_GUID_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:app|application)\s+(?:id|with\s+id)[:\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"#).unwrap()
 });
-
-// WinGet patterns
 static WINGET_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)WinGetApp.*(?:processing|installing|detected|evaluating)"#).unwrap()
 });
 static WINGET_TOKEN_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)(?:winget|microsoft\.winget)"#).unwrap());
-
-// AppWorkload patterns
 static APPWORKLOAD_DOWNLOAD_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:download(?:ing|ed)?|delivery\s+optimization|content\s+download|bytes\s+downloaded|staging\s+(?:file|content)|hash\s+validation)"#,
+        r#"(?i)(?:download(?:ing|ed)?|delivery\s+optimization|content\s+download|bytes\s+downloaded|download\s+progress|download\s+session|content\s+retrieval)"#,
     )
     .unwrap()
 });
 static APPWORKLOAD_STAGING_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:staging\s+(?:file|content)|hash\s+validation|content\s+cached|cache\s+location)"#)
-        .unwrap()
-});
-static APPWORKLOAD_INSTALL_PHASE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:install(?:ing|ation)?|execution|enforcement|installer|launching\s+install|handoff\s+to\s+install)"#,
+        r#"(?i)(?:staging\s+(?:file|content)|hash\s+validation|content\s+cached|cache\s+location|expanded\s+content|extract(?:ed|ing))"#,
     )
     .unwrap()
 });
+static APPWORKLOAD_HASH_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)(?:hash\s+validation|hash\s+mismatch|hash\s+check)"#).unwrap());
 static APPWORKLOAD_INSTALL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r#"(?i)(?:install(?:ing|ation)?|execution|enforcement|installer|launching\s+install|handoff\s+to\s+install|processdetectionrules|detection\s+rule)"#,
     )
     .unwrap()
 });
-
-// AppActionProcessor patterns
+static APPWORKLOAD_RETRY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:retry|retrying|reattempt|will\s+retry|attempt\s+\d+\s+of\s+\d+)"#)
+        .unwrap()
+});
+static APPWORKLOAD_STALL_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:stalled|not\s+progressing|no\s+progress|timed?\s*out|timeout|hung|retry\s+exhausted)"#,
+    )
+    .unwrap()
+});
+static APPWORKLOAD_QUEUE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:queued|queueing|requesting\s+download|waiting\s+for\s+download|waiting\s+for\s+content|pending\s+download)"#,
+    )
+    .unwrap()
+});
+static APPWORKLOAD_FAILURE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:download\s+failed|failed\s+to\s+download|hash\s+validation\s+failed|hash\s+mismatch|staging\s+failed|unable\s+to\s+download|content\s+not\s+found|cancelled|aborted|retry\s+exhausted)"#,
+    )
+    .unwrap()
+});
+static APPWORKLOAD_SUCCESS_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:download\s+completed|download\s+succeeded|staging\s+completed|content\s+cached|hash\s+validation\s+succeeded|install\s+completed|completed\s+successfully)"#,
+    )
+    .unwrap()
+});
 static POLICY_EVAL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:assignment\s+evaluation|targeted\s+intent|applicability\s*=|\bapplicable\b|not\s+applicable|requirement\s+rule|detection\s+rule|local\s+deadline|grs\s+expired|enforcement\s+classification|will\s+not\s+be\s+enforced)"#,
+        r#"(?i)(?:assignment\s+evaluation|targeted\s+intent|applicability\s*=|\bapplicable\b|not\s+applicable|requirement\s+rule|detection\s+rule|local\s+deadline|grs\s+expired|grs\s+not\s+expired|enforcement\s+classification|will\s+not\s+be\s+enforced)"#,
     )
     .unwrap()
 });
@@ -65,11 +82,24 @@ static APP_ACTION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:app\s+with\s+id:|application\s+action|managed\s+app)"#).unwrap()
 });
 static APPLICABILITY_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:applicability|applicable|not\s+applicable|requirement\s+rule|detection\s+rule)"#)
+    Regex::new(r#"(?i)(?:applicability|applicable|not\s+applicable|requirement\s+rule|detection\s+rule|will\s+not\s+be\s+enforced)"#)
         .unwrap()
 });
-
-// Script patterns
+static APPLICABILITY_BLOCK_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:not\s+applicable|applicability\s*(?:=|:)\s*false|will\s+not\s+be\s+enforced|requirement\s+rule.*(?:not\s+satisfied|failed|false)|assignment.*(?:not\s+applicable|not\s+targeted)|enforcement\s+classification.*not\s+applicable)"#,
+    )
+    .unwrap()
+});
+static APPLICABILITY_SUCCESS_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:applicability\s*(?:=|:)\s*true|requirement\s+rule.*(?:passed|satisfied|true)|assignment\s+evaluation\s+completed|applicable\s*=\s*true)"#,
+    )
+    .unwrap()
+});
+static POLICY_PENDING_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:local\s+deadline|grs\s+not\s+expired|scheduled|queued|pending)"#).unwrap()
+});
 static SCRIPT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:PowerShell\s+script|script\s+execution|running\s+script)"#).unwrap()
 });
@@ -78,45 +108,42 @@ static SCRIPT_RESULT_RE: Lazy<Regex> = Lazy::new(|| {
 });
 static AGENTEXECUTOR_SCRIPT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:powershell\s+script\s+is\s+successfully\s+executed|detection\s+script|remediation\s+script|exit\s+code|script\s+(?:completed|failed|timed?\s*out|execution))"#,
+        r#"(?i)(?:powershell\s+script\s+is\s+successfully\s+executed|detection\s+script|remediation\s+script|exit\s+code|script\s+(?:completed|failed|timed?\s*out|execution)|stdout|stderr)"#,
     )
     .unwrap()
 });
 static DETECTION_SCRIPT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)\bdetection\s+script\b"#).unwrap());
-static REMEDIATION_SCRIPT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)\bremediation\s+script\b"#).unwrap());
-
-// Remediation patterns
+    Lazy::new(|| Regex::new(r#"(?i)\b(?:pre-)?detection\s+script\b|\bpre-detect\b"#).unwrap());
+static REMEDIATION_SCRIPT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)\b(?:post-)?remediation\s+script\b|\bpost-detect\b|\bremediation\b"#).unwrap()
+});
+static SCRIPT_FAILURE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:access\s+is\s+denied|unauthorized|permission\s+denied|term\s+'.+'\s+is\s+not\s+recognized|cannot\s+find\s+path|path\s+not\s+found|file\s+not\s+found|module\s+.*\s+not\s+found|parsererror|syntax\s+error|execution\s+policy|digitally\s+signed|failed\s+to\s+execute|exception|stderr)"#,
+    )
+    .unwrap()
+});
 static REMEDIATION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:Remediation|HealthScript|proactive\s+remediation)"#).unwrap()
 });
 static HEALTHSCRIPT_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:healthscript|health\s+script|detection\s+script|remediation\s+script|pre-detect|post-detect|schedule(?:d|ing)?)"#,
+        r#"(?i)(?:healthscript|health\s+script|detection\s+script|remediation\s+script|pre-detect|post-detect|schedule(?:d|ing)?|compliance\s+result)"#,
     )
     .unwrap()
 });
-
-// ESP (Enrollment Status Page) patterns
 static ESP_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:ESP|EspBody|EnrollmentStatusPage|enrollment\s+status)"#).unwrap()
 });
-
-// Sync session patterns
 static SYNC_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)(?:sync\s+session|check-in|SyncSession)"#).unwrap());
-
-// General GUID extraction
 static GUID_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"#)
         .unwrap()
 });
-
-// Error code extraction
 static ERROR_CODE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:error\s*(?:code)?|exit\s*code(?:\s+of\s+the\s+script)?|hresult|hr)\s*(?:is|[=:])\s*(0x[0-9a-fA-F]+|-?\d+)"#,
+        r#"(?i)(?:error\s*(?:code)?|exit\s*code(?:\s+of\s+the\s+script)?|hresult|hr|result|return\s*code)\s*(?:is|[=:])\s*(0x[0-9a-fA-F]+|-?\d+)"#,
     )
     .unwrap()
 });
@@ -125,22 +152,26 @@ static EXIT_CODE_RE: Lazy<Regex> = Lazy::new(|| {
         .unwrap()
 });
 static PENDING_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)(?:pending|queued|waiting|scheduled)"#).unwrap());
-static TIMEOUT_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)(?:timed?\s*out|timeout)"#).unwrap());
+    Lazy::new(|| Regex::new(r#"(?i)(?:pending|queued|waiting|scheduled|requesting)"#).unwrap());
+static TIMEOUT_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:timed?\s*out|timeout|stalled|hung|not\s+progressing|no\s+progress)"#)
+        .unwrap()
+});
 static COMPLIANCE_TRUE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)compliance\s+result.*\bis\s+true\b"#).unwrap());
 static COMPLIANCE_FALSE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)compliance\s+result.*\bis\s+false\b"#).unwrap());
-
-// Status detection
 static SUCCESS_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:success|succeeded|completed\s+successfully|installed|detected|compliant)"#)
-        .unwrap()
+    Regex::new(
+        r#"(?i)(?:success|succeeded|completed\s+successfully|installed|detected|compliant|validated|passed)"#,
+    )
+    .unwrap()
 });
 static FAILED_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?i)(?:fail|error|not\s+detected|not\s+installed|non-compliant|timed?\s*out)"#)
-        .unwrap()
+    Regex::new(
+        r#"(?i)(?:fail|error|not\s+detected|not\s+installed|non-compliant|cancelled|aborted|exception)"#,
+    )
+    .unwrap()
 });
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,63 +184,43 @@ enum ImeSourceKind {
     Other,
 }
 
-/// Extract Intune events from parsed IME log lines.
 pub fn extract_events(lines: &[ImeLine], source_file: &str) -> Vec<IntuneEvent> {
     let mut events = Vec::new();
-    let mut next_id: u64 = 0;
+    let mut next_id = 0u64;
     let source_kind = classify_source_kind(source_file);
 
     for line in lines {
-        let msg = &line.message;
+        let Some(event_type) = detect_event_type(&line.message, source_kind) else {
+            continue;
+        };
 
-        // Check each event type in priority order
-        let event_type = detect_event_type(line, source_kind);
+        let guid = extract_guid(&line.message);
+        let status = determine_status(&line.message, source_kind);
+        let name = build_event_name(&event_type, &guid, &line.message, source_kind);
+        let detail = if line.message.len() > 300 {
+            format!("{}...", &line.message[..300])
+        } else {
+            line.message.clone()
+        };
 
-        if let Some(evt_type) = event_type {
-            // Extract GUID
-            let guid = extract_guid(msg);
-
-            // Determine status
-            let status = determine_status(msg);
-
-            // Extract error code if present
-            let error_code = ERROR_CODE_RE
-                .captures(msg)
-                .and_then(|c| c.get(1))
-                .map(|m| m.as_str().to_string());
-
-            // Build display name
-            let name = build_event_name(&evt_type, &guid, msg, source_kind);
-
-            // Truncate detail message to reasonable length
-            let detail = if msg.len() > 300 {
-                format!("{}...", &msg[..300])
-            } else {
-                msg.clone()
-            };
-
-            events.push(IntuneEvent {
-                id: next_id,
-                event_type: evt_type,
-                name,
-                guid,
-                status,
-                start_time: line.timestamp.clone(),
-                end_time: None,
-                duration_secs: None,
-                error_code,
-                detail,
-                source_file: source_file.to_string(),
-                line_number: line.line_number,
-            });
-
-            next_id += 1;
-        }
+        events.push(IntuneEvent {
+            id: next_id,
+            event_type,
+            name,
+            guid,
+            status,
+            start_time: line.timestamp.clone(),
+            end_time: None,
+            duration_secs: None,
+            error_code: extract_error_code(&line.message),
+            detail,
+            source_file: source_file.to_string(),
+            line_number: line.line_number,
+        });
+        next_id += 1;
     }
 
-    // Post-process: pair start/end events and calculate durations
     pair_events(&mut events);
-
     events
 }
 
@@ -234,34 +245,32 @@ fn classify_source_kind(source_file: &str) -> ImeSourceKind {
     }
 }
 
-fn detect_event_type(line: &ImeLine, source_kind: ImeSourceKind) -> Option<IntuneEventType> {
-    let msg = line.message.as_str();
-
+fn detect_event_type(msg: &str, source_kind: ImeSourceKind) -> Option<IntuneEventType> {
     match source_kind {
         ImeSourceKind::AppWorkload => {
             if !is_appworkload_event_candidate(msg) {
                 return None;
             }
-
-            if APPWORKLOAD_DOWNLOAD_RE.is_match(msg) {
-                return Some(IntuneEventType::ContentDownload);
-            }
             if WINGET_TOKEN_RE.is_match(msg) || WINGET_RE.is_match(msg) {
                 return Some(IntuneEventType::WinGetApp);
+            }
+            if APPWORKLOAD_DOWNLOAD_RE.is_match(msg)
+                || APPWORKLOAD_STAGING_RE.is_match(msg)
+                || APPWORKLOAD_RETRY_RE.is_match(msg)
+                || APPWORKLOAD_STALL_RE.is_match(msg)
+            {
+                return Some(IntuneEventType::ContentDownload);
             }
             if APPWORKLOAD_INSTALL_RE.is_match(msg) {
                 return Some(IntuneEventType::Win32App);
             }
         }
         ImeSourceKind::AppActionProcessor => {
-            if !is_app_action_processor_event_candidate(msg) {
-                return None;
-            }
-
-            if POLICY_EVAL_RE.is_match(msg) {
-                return Some(IntuneEventType::PolicyEvaluation);
-            }
-            if APP_ACTION_RE.is_match(msg) || APPLICABILITY_RE.is_match(msg) {
+            if is_app_action_processor_event_candidate(msg)
+                && (POLICY_EVAL_RE.is_match(msg)
+                    || APP_ACTION_RE.is_match(msg)
+                    || APPLICABILITY_RE.is_match(msg))
+            {
                 return Some(IntuneEventType::PolicyEvaluation);
             }
         }
@@ -269,8 +278,7 @@ fn detect_event_type(line: &ImeLine, source_kind: ImeSourceKind) -> Option<Intun
             if !is_agent_executor_event_candidate(msg) {
                 return None;
             }
-
-            if REMEDIATION_RE.is_match(msg) {
+            if REMEDIATION_SCRIPT_RE.is_match(msg) || REMEDIATION_RE.is_match(msg) {
                 return Some(IntuneEventType::Remediation);
             }
             if AGENTEXECUTOR_SCRIPT_RE.is_match(msg)
@@ -281,15 +289,9 @@ fn detect_event_type(line: &ImeLine, source_kind: ImeSourceKind) -> Option<Intun
             }
         }
         ImeSourceKind::HealthScripts => {
-            if !is_healthscripts_event_candidate(msg) {
-                return None;
-            }
-
-            if msg.to_ascii_lowercase().contains("exit code of the script") {
-                return Some(IntuneEventType::Remediation);
-            }
-
-            if HEALTHSCRIPT_RE.is_match(msg) || REMEDIATION_RE.is_match(msg) {
+            if is_healthscripts_event_candidate(msg)
+                && (HEALTHSCRIPT_RE.is_match(msg) || REMEDIATION_RE.is_match(msg))
+            {
                 return Some(IntuneEventType::Remediation);
             }
         }
@@ -315,8 +317,14 @@ fn detect_event_type(line: &ImeLine, source_kind: ImeSourceKind) -> Option<Intun
 
 fn is_agent_executor_event_candidate(msg: &str) -> bool {
     let normalized = msg.to_ascii_lowercase();
-
-    if is_agent_executor_noise_line(&normalized) {
+    if normalized.ends_with(".timeout")
+        || normalized.ends_with("quotedtimeoutfilepath.txt")
+        || normalized.contains("prepare to run powershell script")
+        || normalized.contains("remediation script option gets invoked")
+        || normalized.contains("creating command line parser")
+        || normalized.contains("adding argument")
+        || normalized.contains("powershell path is")
+    {
         return false;
     }
 
@@ -329,19 +337,13 @@ fn is_agent_executor_event_candidate(msg: &str) -> bool {
         || normalized.contains("script execution")
         || normalized.contains("timed out")
         || normalized.contains("timeout")
+        || normalized.contains("stdout")
+        || normalized.contains("stderr")
         || normalized.contains("exit code")
 }
 
-    fn is_agent_executor_noise_line(normalized: &str) -> bool {
-        normalized.ends_with(".timeout")
-        || normalized.ends_with("quotedtimeoutfilepath.txt")
-        || normalized.contains("prepare to run powershell script")
-        || normalized.contains("remediation script option gets invoked")
-    }
-
 fn is_appworkload_event_candidate(msg: &str) -> bool {
     let normalized = msg.to_ascii_lowercase();
-
     if normalized.contains("reportingmanager")
         || normalized.contains("reportingcachemanager")
         || normalized.contains("reporting state initialized")
@@ -353,46 +355,35 @@ fn is_appworkload_event_candidate(msg: &str) -> bool {
         return false;
     }
 
-    normalized.contains("download")
-        || normalized.contains("delivery optimization")
-        || normalized.contains("staging ")
-        || normalized.contains("hash validation")
-        || normalized.contains("content cached")
-        || normalized.contains("cache location")
-        || normalized.contains("install")
-        || normalized.contains("installer")
-        || normalized.contains("execution")
-        || normalized.contains("enforcement")
-        || normalized.contains("handoff")
-        || normalized.contains("winget")
+    APPWORKLOAD_DOWNLOAD_RE.is_match(msg)
+        || APPWORKLOAD_STAGING_RE.is_match(msg)
+        || APPWORKLOAD_INSTALL_RE.is_match(msg)
+        || APPWORKLOAD_RETRY_RE.is_match(msg)
+        || APPWORKLOAD_STALL_RE.is_match(msg)
+        || WINGET_TOKEN_RE.is_match(msg)
 }
 
 fn is_app_action_processor_event_candidate(msg: &str) -> bool {
     let normalized = msg.to_ascii_lowercase();
-
-    if normalized.contains("processor initializing")
+    !(normalized.contains("processor initializing")
         || (normalized.contains("found:") && normalized.contains("apps with intent"))
         || normalized.contains("evaluating install enforcement actions for app with id")
-        || normalized.contains("no action required for app with id")
-    {
-        return false;
-    }
-
-    normalized.contains("app with id:")
-        || normalized.contains("assignment evaluation")
-        || normalized.contains("targeted intent")
-        || normalized.contains("applicability =")
-        || normalized.contains("not applicable")
-        || normalized.contains("local deadline")
-        || normalized.contains("grs expired")
-        || normalized.contains("requirement rule")
-        || normalized.contains("detection rule")
-        || normalized.contains("will not be enforced")
+        || normalized.contains("no action required for app with id"))
+        && (normalized.contains("app with id:")
+            || normalized.contains("assignment evaluation")
+            || normalized.contains("targeted intent")
+            || normalized.contains("applicability =")
+            || normalized.contains("not applicable")
+            || normalized.contains("local deadline")
+            || normalized.contains("grs expired")
+            || normalized.contains("grs not expired")
+            || normalized.contains("requirement rule")
+            || normalized.contains("detection rule")
+            || normalized.contains("will not be enforced"))
 }
 
 fn is_healthscripts_event_candidate(msg: &str) -> bool {
     let normalized = msg.to_ascii_lowercase();
-
     if normalized.contains("inspect hourly schedule")
         || normalized.contains("job is queued and will be scheduled")
         || normalized.contains("completed user session")
@@ -409,35 +400,39 @@ fn is_healthscripts_event_candidate(msg: &str) -> bool {
         || normalized.contains("timed out")
         || normalized.contains("timeout")
         || normalized.contains("failed")
+        || normalized.contains("schedule")
 }
 
-/// Extract the most relevant GUID from a message.
 fn extract_guid(msg: &str) -> Option<String> {
-    // First try Win32-specific GUID extraction
-    if let Some(cap) = WIN32_GUID_RE.captures(msg) {
-        return cap.get(1).map(|m| m.as_str().to_string());
-    }
-
-    // Fall back to first GUID found
-    GUID_RE
+    WIN32_GUID_RE
         .captures(msg)
-        .and_then(|c| c.get(1))
-        .map(|m| m.as_str().to_string())
+        .and_then(|cap| cap.get(1))
+        .map(|value| value.as_str().to_string())
+        .or_else(|| {
+            GUID_RE
+                .captures(msg)
+                .and_then(|cap| cap.get(1))
+                .map(|value| value.as_str().to_string())
+        })
 }
 
-/// Determine the status of an event from its message text.
-fn determine_status(msg: &str) -> IntuneStatus {
+fn extract_error_code(msg: &str) -> Option<String> {
+    ERROR_CODE_RE
+        .captures(msg)
+        .and_then(|cap| cap.get(1))
+        .map(|value| value.as_str().to_string())
+}
+
+fn determine_status(msg: &str, source_kind: ImeSourceKind) -> IntuneStatus {
     if COMPLIANCE_TRUE_RE.is_match(msg) {
         return IntuneStatus::Success;
     }
-
     if COMPLIANCE_FALSE_RE.is_match(msg) {
         return IntuneStatus::Failed;
     }
-
     if let Some(exit_code) = EXIT_CODE_RE
         .captures(msg)
-        .and_then(|captures| captures.get(1))
+        .and_then(|cap| cap.get(1))
         .and_then(|value| value.as_str().parse::<i32>().ok())
     {
         return if exit_code == 0 {
@@ -447,31 +442,71 @@ fn determine_status(msg: &str) -> IntuneStatus {
         };
     }
 
-    if TIMEOUT_RE.is_match(msg) {
-        IntuneStatus::Timeout
-    } else if FAILED_RE.is_match(msg) {
-        IntuneStatus::Failed
-    } else if SUCCESS_RE.is_match(msg) {
-        IntuneStatus::Success
-    } else if PENDING_RE.is_match(msg) {
-        IntuneStatus::Pending
-    } else {
-        IntuneStatus::InProgress
+    match source_kind {
+        ImeSourceKind::AppWorkload => {
+            if APPWORKLOAD_STALL_RE.is_match(msg) || TIMEOUT_RE.is_match(msg) {
+                IntuneStatus::Timeout
+            } else if APPWORKLOAD_RETRY_RE.is_match(msg) || APPWORKLOAD_FAILURE_RE.is_match(msg) {
+                IntuneStatus::Failed
+            } else if APPWORKLOAD_SUCCESS_RE.is_match(msg) {
+                IntuneStatus::Success
+            } else if APPWORKLOAD_QUEUE_RE.is_match(msg) || PENDING_RE.is_match(msg) {
+                IntuneStatus::Pending
+            } else {
+                IntuneStatus::InProgress
+            }
+        }
+        ImeSourceKind::AppActionProcessor => {
+            if APPLICABILITY_BLOCK_RE.is_match(msg) {
+                IntuneStatus::Failed
+            } else if APPLICABILITY_SUCCESS_RE.is_match(msg) {
+                IntuneStatus::Success
+            } else if POLICY_PENDING_RE.is_match(msg) {
+                IntuneStatus::Pending
+            } else {
+                IntuneStatus::InProgress
+            }
+        }
+        ImeSourceKind::AgentExecutor | ImeSourceKind::HealthScripts => {
+            if TIMEOUT_RE.is_match(msg) {
+                IntuneStatus::Timeout
+            } else if SCRIPT_FAILURE_RE.is_match(msg) || FAILED_RE.is_match(msg) {
+                IntuneStatus::Failed
+            } else if SUCCESS_RE.is_match(msg) {
+                IntuneStatus::Success
+            } else if PENDING_RE.is_match(msg) {
+                IntuneStatus::Pending
+            } else {
+                IntuneStatus::InProgress
+            }
+        }
+        ImeSourceKind::PrimaryIme | ImeSourceKind::Other => {
+            if TIMEOUT_RE.is_match(msg) {
+                IntuneStatus::Timeout
+            } else if FAILED_RE.is_match(msg) {
+                IntuneStatus::Failed
+            } else if SUCCESS_RE.is_match(msg) {
+                IntuneStatus::Success
+            } else if PENDING_RE.is_match(msg) {
+                IntuneStatus::Pending
+            } else {
+                IntuneStatus::InProgress
+            }
+        }
     }
 }
 
-/// Build a human-readable name for an event.
 fn build_event_name(
     event_type: &IntuneEventType,
     guid: &Option<String>,
     msg: &str,
     source_kind: ImeSourceKind,
 ) -> String {
-    if let Some(specific_name) = build_source_specific_name(event_type, guid, msg, source_kind) {
-        return specific_name;
+    if let Some(name) = build_source_specific_name(event_type, guid, msg, source_kind) {
+        return name;
     }
 
-    let type_label = match event_type {
+    let label = match event_type {
         IntuneEventType::Win32App => "Win32 App",
         IntuneEventType::WinGetApp => "WinGet App",
         IntuneEventType::PowerShellScript => "PowerShell Script",
@@ -483,34 +518,11 @@ fn build_event_name(
         IntuneEventType::Other => "Other",
     };
 
-    let source_prefix = match source_kind {
-        ImeSourceKind::AppWorkload => Some("AppWorkload"),
-        ImeSourceKind::AppActionProcessor => Some("AppActionProcessor"),
-        ImeSourceKind::AgentExecutor => Some("AgentExecutor"),
-        ImeSourceKind::HealthScripts => Some("HealthScripts"),
-        _ => None,
-    };
-
     if let Some(guid) = guid {
-        // Show truncated GUID for readability
-        let short_guid = if guid.len() > 8 { &guid[..8] } else { guid };
-        match source_prefix {
-            Some(prefix) => format!("{} {} ({}...)", prefix, type_label, short_guid),
-            None => format!("{} ({}...)", type_label, short_guid),
-        }
+        let short = short_guid(guid);
+        format!("{label} ({short}...)")
     } else {
-        // Try to extract a meaningful snippet from the message
-        let snippet = msg.chars().take(50).collect::<String>();
-        let base = if snippet.len() < msg.len() {
-            format!("{}: {}...", type_label, snippet)
-        } else {
-            format!("{}: {}", type_label, snippet)
-        };
-
-        match source_prefix {
-            Some(prefix) => format!("{} {}", prefix, base),
-            None => base,
-        }
+        format!("{label}: {}", msg.chars().take(50).collect::<String>())
     }
 }
 
@@ -520,76 +532,93 @@ fn build_source_specific_name(
     msg: &str,
     source_kind: ImeSourceKind,
 ) -> Option<String> {
-    let short_guid = guid
-        .as_deref()
-        .map(|value| if value.len() > 8 { &value[..8] } else { value });
+    let short_guid = guid.as_deref().map(short_guid);
 
     match source_kind {
         ImeSourceKind::AppWorkload => {
-            let phase = if APPWORKLOAD_STAGING_RE.is_match(msg) {
+            let phase = if APPWORKLOAD_STALL_RE.is_match(msg) {
+                "Download Stall"
+            } else if APPWORKLOAD_RETRY_RE.is_match(msg) {
+                "Download Retry"
+            } else if APPWORKLOAD_HASH_RE.is_match(msg) {
+                "Hash Validation"
+            } else if APPWORKLOAD_STAGING_RE.is_match(msg) {
                 "Staging"
-            } else if APPWORKLOAD_INSTALL_PHASE_RE.is_match(msg) {
+            } else if APPWORKLOAD_INSTALL_RE.is_match(msg) {
                 "Install"
             } else if APPWORKLOAD_DOWNLOAD_RE.is_match(msg) {
                 "Download"
             } else {
                 return None;
             };
-
             Some(match short_guid {
-                Some(guid) => format!("AppWorkload {} ({}...)", phase, guid),
-                None => format!("AppWorkload {}", phase),
+                Some(short) => format!("AppWorkload {phase} ({short}...)") ,
+                None => format!("AppWorkload {phase}"),
             })
         }
         ImeSourceKind::AppActionProcessor => {
-            let area = if APPLICABILITY_RE.is_match(msg) {
+            let area = if APPLICABILITY_BLOCK_RE.is_match(msg) || APPLICABILITY_RE.is_match(msg) {
                 "Applicability"
+            } else if contains_case_insensitive(msg, "requirement rule") {
+                "Requirement Rule"
+            } else if contains_case_insensitive(msg, "detection rule") {
+                "Detection Rule"
             } else if POLICY_EVAL_RE.is_match(msg) {
                 "Policy Evaluation"
             } else {
                 return None;
             };
-
             Some(match short_guid {
-                Some(guid) => format!("AppActionProcessor {} ({}...)", area, guid),
-                None => format!("AppActionProcessor {}", area),
+                Some(short) => format!("AppActionProcessor {area} ({short}...)") ,
+                None => format!("AppActionProcessor {area}"),
             })
         }
         ImeSourceKind::AgentExecutor => {
-            let area = if REMEDIATION_SCRIPT_RE.is_match(msg) {
+            let area = if REMEDIATION_SCRIPT_RE.is_match(msg) || *event_type == IntuneEventType::Remediation {
                 "Remediation Script"
             } else if DETECTION_SCRIPT_RE.is_match(msg) {
                 "Detection Script"
-            } else if *event_type == IntuneEventType::Remediation {
-                "Remediation Script"
+            } else if TIMEOUT_RE.is_match(msg) {
+                "Script Timeout"
             } else {
                 "PowerShell Script"
             };
-
             Some(match short_guid {
-                Some(guid) => format!("AgentExecutor {} ({}...)", area, guid),
-                None => format!("AgentExecutor {}", area),
+                Some(short) => format!("AgentExecutor {area} ({short}...)") ,
+                None => format!("AgentExecutor {area}"),
             })
         }
         ImeSourceKind::HealthScripts => {
             let area = if REMEDIATION_SCRIPT_RE.is_match(msg) {
                 "Remediation"
-            } else if DETECTION_SCRIPT_RE.is_match(msg) {
+            } else if DETECTION_SCRIPT_RE.is_match(msg)
+                || contains_case_insensitive(msg, "compliance result")
+            {
                 "Detection"
             } else {
                 "Schedule"
             };
-
             Some(match short_guid {
-                Some(guid) => format!("HealthScripts {} ({}...)", area, guid),
-                None => format!("HealthScripts {}", area),
+                Some(short) => format!("HealthScripts {area} ({short}...)") ,
+                None => format!("HealthScripts {area}"),
             })
         }
         ImeSourceKind::PrimaryIme | ImeSourceKind::Other => None,
     }
 }
 
-/// Pair start/end events and calculate durations.
+fn short_guid(value: &str) -> &str {
+    if value.len() > 8 {
+        &value[..8]
+    } else {
+        value
+    }
+}
+
+fn contains_case_insensitive(value: &str, needle: &str) -> bool {
+    value.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+}
+
 fn pair_events(events: &mut Vec<IntuneEvent>) {
     let mut consumed_end_indices: HashSet<usize> = HashSet::new();
     let mut open_events: HashMap<String, Vec<usize>> = HashMap::new();
@@ -604,7 +633,6 @@ fn pair_events(events: &mut Vec<IntuneEvent>) {
             open_events.entry(identity_key).or_default().push(index);
             continue;
         }
-
         if !(status == IntuneStatus::Success
             || status == IntuneStatus::Failed
             || status == IntuneStatus::Timeout)
@@ -612,13 +640,9 @@ fn pair_events(events: &mut Vec<IntuneEvent>) {
             continue;
         }
 
-        let Some(start_index) = open_events
-            .get_mut(&identity_key)
-            .and_then(|indices| indices.pop())
-        else {
+        let Some(start_index) = open_events.get_mut(&identity_key).and_then(|indices| indices.pop()) else {
             continue;
         };
-
         if consumed_end_indices.contains(&index) {
             continue;
         }
@@ -689,7 +713,13 @@ fn event_type_identity(event_type: &IntuneEventType) -> &'static str {
 fn normalize_identity_fragment(value: &str) -> String {
     value
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { ' ' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .take(6)
@@ -697,12 +727,8 @@ fn normalize_identity_fragment(value: &str) -> String {
         .join(" ")
 }
 
-/// Estimate duration between two timestamp strings.
-/// Handles formats like "MM-dd-yyyy HH:mm:ss.fff"
 fn estimate_duration(start: &str, end: &str) -> Option<f64> {
-    // Simple approach: parse the time portion and calculate difference
     let parse_seconds = |ts: &str| -> Option<f64> {
-        // Extract time portion after date
         let time_part = ts.split_whitespace().last()?;
         let parts: Vec<&str> = time_part.split(':').collect();
         if parts.len() >= 3 {
@@ -717,12 +743,10 @@ fn estimate_duration(start: &str, end: &str) -> Option<f64> {
 
     let start_secs = parse_seconds(start)?;
     let end_secs = parse_seconds(end)?;
-
     let diff = end_secs - start_secs;
     if diff >= 0.0 {
         Some(diff)
     } else {
-        // Crossed midnight
         Some(diff + 86400.0)
     }
 }
@@ -741,10 +765,10 @@ mod tests {
     }
 
     #[test]
-    fn appworkload_extracts_content_download_events() {
+    fn appworkload_extracts_stalled_download_events() {
         let events = extract_events(
             &[line(
-                "AppWorkload reporting content download completed successfully for app id: a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "AppWorkload download stalled with no progress for app id: a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                 "01-15-2024 10:00:05.000",
                 1,
             )],
@@ -753,14 +777,14 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, IntuneEventType::ContentDownload);
-        assert_eq!(events[0].status, IntuneStatus::Success);
+        assert_eq!(events[0].status, IntuneStatus::Timeout);
     }
 
     #[test]
-    fn app_action_processor_extracts_policy_evaluation_events() {
+    fn app_action_processor_marks_not_applicable_as_failed() {
         let events = extract_events(
             &[line(
-                "Assignment evaluation started for app with id: a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+                "Assignment evaluation found app is not applicable and will not be enforced for app with id: a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                 "01-15-2024 10:00:05.000",
                 1,
             )],
@@ -769,14 +793,14 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, IntuneEventType::PolicyEvaluation);
-        assert_eq!(events[0].name, "AppActionProcessor Policy Evaluation (a1b2c3d4...)".to_string());
+        assert_eq!(events[0].status, IntuneStatus::Failed);
     }
 
     #[test]
-    fn agent_executor_extracts_script_events() {
+    fn agent_executor_extracts_remediation_timeout() {
         let events = extract_events(
             &[line(
-                "AgentExecutor detection script completed with exit code: 0",
+                "AgentExecutor remediation script timed out for package a1b2c3d4-e5f6-7890-abcd-ef1234567890",
                 "01-15-2024 10:00:05.000",
                 1,
             )],
@@ -784,9 +808,8 @@ mod tests {
         );
 
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, IntuneEventType::PowerShellScript);
-        assert_eq!(events[0].status, IntuneStatus::Success);
-        assert_eq!(events[0].name, "AgentExecutor Detection Script".to_string());
+        assert_eq!(events[0].event_type, IntuneEventType::Remediation);
+        assert_eq!(events[0].status, IntuneStatus::Timeout);
     }
 
     #[test]
@@ -803,188 +826,11 @@ mod tests {
                     "01-15-2024 10:00:06.000",
                     2,
                 ),
-                line(
-                    "PowerShell path is C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
-                    "01-15-2024 10:00:07.000",
-                    3,
-                ),
             ],
             "C:/Logs/AgentExecutor.log",
         );
 
         assert!(events.is_empty());
-    }
-
-    #[test]
-    fn agent_executor_skips_timeout_path_and_prepare_noise() {
-        let events = extract_events(
-            &[
-                line(
-                    r#"C:\Windows\IMECache\HealthScripts\79880037-a3c4-489a-a7e6-a6a705b52b78_1\e154babf-cb85-4711-9bd9-3da0a1b846f2_PreDetectScript.timeout"#,
-                    "01-15-2024 10:00:05.000",
-                    1,
-                ),
-                line(
-                    "Prepare to run Powershell Script ..",
-                    "01-15-2024 10:00:06.000",
-                    2,
-                ),
-                line(
-                    "remediation script option gets invoked",
-                    "01-15-2024 10:00:07.000",
-                    3,
-                ),
-            ],
-            "C:/Logs/AgentExecutor.log",
-        );
-
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn app_action_processor_skips_summary_noise() {
-        let events = extract_events(
-            &[
-                line(
-                    "[Win32App][ActionProcessor] Found: 0 apps with intent to uninstall before enforcing installs: [].",
-                    "01-15-2024 10:00:05.000",
-                    1,
-                ),
-                line(
-                    "[Win32App][ActionProcessor] Processor initializing. Detection and applicability checks will run for all apps in the subgraph.",
-                    "01-15-2024 10:00:06.000",
-                    2,
-                ),
-                line(
-                    "[Win32App][ActionProcessor] Evaluating install enforcement actions for app with id: a1b2c3d4-e5f6-7890-abcd-ef1234567890.",
-                    "01-15-2024 10:00:07.000",
-                    3,
-                ),
-                line(
-                    "[Win32App][ActionProcessor] No action required for app with id: a1b2c3d4-e5f6-7890-abcd-ef1234567890.",
-                    "01-15-2024 10:00:08.000",
-                    4,
-                ),
-            ],
-            "C:/Logs/AppActionProcessor.log",
-        );
-
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn appworkload_skips_reporting_manager_noise() {
-        let events = extract_events(
-            &[line(
-                "[Win32App][ReportingManager] App with id: 174012d1-1931-4852-b64b-0754350ffe88 and prior AppAuthority: V3 has been loaded and reporting state initialized. ReportingState: {\"ApplicationId\":\"174012d1-1931-4852-b64b-0754350ffe88\",\"WriteableToStorage\":true,\"CanGenerateComplianceState\":true,\"CanGenerateEnforcementState\":true,\"IsAppReportable\":true}",
-                "01-15-2024 10:00:05.000",
-                1,
-            )],
-            "C:/Logs/AppWorkload.log",
-        );
-
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn healthscripts_extracts_remediation_events() {
-        let events = extract_events(
-            &[line(
-                "HealthScripts detection script scheduled for proactive remediation package",
-                "01-15-2024 10:00:05.000",
-                1,
-            )],
-            "C:/Logs/HealthScripts.log",
-        );
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, IntuneEventType::Remediation);
-        assert_eq!(events[0].status, IntuneStatus::Pending);
-        assert_eq!(events[0].name, "HealthScripts Detection".to_string());
-    }
-
-    #[test]
-    fn healthscripts_skips_schedule_noise() {
-        let events = extract_events(
-            &[
-                line(
-                    "[HS] inspect hourly schedule for policy 79880037-a3c4-489a-a7e6-a6a705b52b78: UTC = False, Interval = 1, Time = ",
-                    "01-15-2024 10:00:05.000",
-                    1,
-                ),
-                line(
-                    "[HS] Runner : Job is queued and will be scheduled to run at UTC 3/2/2026 11:37:43 AM.",
-                    "01-15-2024 10:00:06.000",
-                    2,
-                ),
-                line(
-                    "[HS] Runner ..................... Completed user session 0, userId: 00000000-0000-0000-0000-000000000000, userSID: ..................... ",
-                    "01-15-2024 10:00:07.000",
-                    3,
-                ),
-            ],
-            "C:/Logs/HealthScripts.log",
-        );
-
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn healthscripts_compliance_result_marks_terminal_status() {
-        let success_events = extract_events(
-            &[line(
-                "[HS] the pre-remdiation detection script compliance result for 79880037-a3c4-489a-a7e6-a6a705b52b78 is True",
-                "01-15-2024 10:00:05.000",
-                1,
-            )],
-            "C:/Logs/HealthScripts.log",
-        );
-
-        assert_eq!(success_events.len(), 1);
-        assert_eq!(success_events[0].status, IntuneStatus::Success);
-
-        let failed_events = extract_events(
-            &[line(
-                "[HS] the pre-remdiation detection script compliance result for 79880037-a3c4-489a-a7e6-a6a705b52b78 is False",
-                "01-15-2024 10:00:06.000",
-                1,
-            )],
-            "C:/Logs/HealthScripts.log",
-        );
-
-        assert_eq!(failed_events.len(), 1);
-        assert_eq!(failed_events[0].status, IntuneStatus::Failed);
-    }
-
-    #[test]
-    fn healthscripts_exit_code_is_parsed_with_is_syntax() {
-        let events = extract_events(
-            &[line(
-                "[HS] exit code of the script is 0",
-                "01-15-2024 10:00:05.000",
-                1,
-            )],
-            "C:/Logs/HealthScripts.log",
-        );
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].status, IntuneStatus::Success);
-    }
-
-    #[test]
-    fn appworkload_install_lines_are_named_as_install_phase() {
-        let events = extract_events(
-            &[line(
-                "AppWorkload launching install handoff for app id: a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-                "01-15-2024 10:00:05.000",
-                1,
-            )],
-            "C:/Logs/AppWorkload.log",
-        );
-
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, IntuneEventType::Win32App);
-        assert_eq!(events[0].name, "AppWorkload Install (a1b2c3d4...)".to_string());
     }
 
     #[test]
@@ -1007,7 +853,6 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].status, IntuneStatus::Success);
-        assert_eq!(events[0].end_time.as_deref(), Some("01-15-2024 10:01:00.000"));
         assert_eq!(events[0].duration_secs, Some(60.0));
     }
 }

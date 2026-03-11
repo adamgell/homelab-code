@@ -43,6 +43,56 @@ export interface DownloadStat {
   timestamp: string | null;
 }
 
+export interface IntuneTimestampBounds {
+  firstTimestamp: string | null;
+  lastTimestamp: string | null;
+}
+
+export interface IntuneDiagnosticsFileCoverage {
+  filePath: string;
+  eventCount: number;
+  downloadCount: number;
+  timestampBounds: IntuneTimestampBounds | null;
+  isRotatedSegment: boolean;
+  rotationGroup: string | null;
+}
+
+export interface IntuneDominantSource {
+  filePath: string;
+  eventCount: number;
+  eventShare: number | null;
+}
+
+export interface IntuneDiagnosticsCoverage {
+  files: IntuneDiagnosticsFileCoverage[];
+  timestampBounds: IntuneTimestampBounds | null;
+  hasRotatedLogs: boolean;
+  dominantSource: IntuneDominantSource | null;
+}
+
+export type IntuneDiagnosticsConfidenceLevel =
+  | "Unknown"
+  | "Low"
+  | "Medium"
+  | "High";
+
+export interface IntuneDiagnosticsConfidence {
+  level: IntuneDiagnosticsConfidenceLevel;
+  score: number | null;
+  reasons: string[];
+}
+
+export interface IntuneRepeatedFailureGroup {
+  id: string;
+  name: string;
+  eventType: IntuneEventType;
+  errorCode: string | null;
+  occurrences: number;
+  timestampBounds: IntuneTimestampBounds | null;
+  sourceFiles: string[];
+  sampleEventIds: number[];
+}
+
 export interface IntuneSummary {
   totalEvents: number;
   win32Apps: number;
@@ -59,6 +109,9 @@ export interface IntuneSummary {
   failedDownloads: number;
   failedScripts: number;
   logTimeSpan: string | null;
+  diagnosticsCoverage?: IntuneDiagnosticsCoverage;
+  diagnosticsConfidence?: IntuneDiagnosticsConfidence;
+  repeatedFailures?: IntuneRepeatedFailureGroup[];
 }
 
 export type IntuneDiagnosticSeverity = "Info" | "Warning" | "Error";
@@ -107,4 +160,7 @@ export interface IntuneAnalysisResult {
   diagnostics: IntuneDiagnosticInsight[];
   sourceFile: string;
   sourceFiles: string[];
+  diagnosticsCoverage: IntuneDiagnosticsCoverage;
+  diagnosticsConfidence: IntuneDiagnosticsConfidence;
+  repeatedFailures: IntuneRepeatedFailureGroup[];
 }

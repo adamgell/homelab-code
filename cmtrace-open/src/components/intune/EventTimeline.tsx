@@ -3,6 +3,9 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import type { IntuneEvent, IntuneStatus, IntuneEventType } from "../../types/intune";
 import { useIntuneStore } from "../../stores/intune-store";
 
+const COLLAPSED_ROW_ESTIMATE = 28;
+const EXPANDED_ROW_ESTIMATE = 160;
+
 const STATUS_COLORS: Record<IntuneStatus, string> = {
   Success: "#22c55e",
   Failed: "#ef4444",
@@ -73,9 +76,12 @@ export function EventTimeline({ events }: EventTimelineProps) {
     count: filteredEvents.length,
     getScrollElement: () => parentRef.current,
     estimateSize: (index) =>
-      filteredEvents[index]?.id === selectedEventId ? 140 : 28,
+      filteredEvents[index]?.id === selectedEventId ? EXPANDED_ROW_ESTIMATE : COLLAPSED_ROW_ESTIMATE,
+    getItemKey: (index) => filteredEvents[index]?.id ?? index,
     overscan: 10,
   });
+
+  const virtualRows = virtualizer.getVirtualItems();
 
   useEffect(() => {
     if (selectedIndex >= 0) {
@@ -119,22 +125,24 @@ export function EventTimeline({ events }: EventTimelineProps) {
           position: "relative",
         }}
       >
-        {virtualizer.getVirtualItems().map((virtualRow) => {
-          const event = filteredEvents[virtualRow.index];
-          const isSelected = selectedEventId === event.id;
+        <div
+          style={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            width: "100%",
+            transform: `translateY(${virtualRows[0]?.start ?? 0}px)`,
+          }}
+        >
+          {virtualRows.map((virtualRow) => {
+            const event = filteredEvents[virtualRow.index];
+            const isSelected = selectedEventId === event.id;
 
-          return (
-            <div
-              key={event.id}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: "100%",
-                transform: `translateY(${virtualRow.start}px)`,
-              }}
-            >
+            return (
               <div
+                key={virtualRow.key}
+                data-index={virtualRow.index}
+                ref={virtualizer.measureElement}
                 onClick={() => selectEvent(isSelected ? null : event.id)}
                 style={{
                   display: "flex",
@@ -278,9 +286,9 @@ export function EventTimeline({ events }: EventTimelineProps) {
                   </div>
                 )}
               </div>
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
     </div>
   );

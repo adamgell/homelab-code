@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -10,7 +11,9 @@ use crate::intune::event_tracker;
 use crate::intune::ime_parser;
 use crate::intune::models::{
     DownloadStat, IntuneAnalysisResult, IntuneDiagnosticInsight, IntuneDiagnosticSeverity,
-    IntuneEvent, IntuneEventType, IntuneStatus, IntuneSummary,
+    IntuneDiagnosticsConfidence, IntuneDiagnosticsConfidenceLevel, IntuneDiagnosticsCoverage,
+    IntuneDiagnosticsFileCoverage, IntuneDominantSource, IntuneEvent, IntuneEventType,
+    IntuneRepeatedFailureGroup, IntuneStatus, IntuneSummary, IntuneTimestampBounds,
 };
 use crate::intune::timeline;
 
@@ -59,6 +62,7 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
 
     let mut all_events = Vec::new();
     let mut all_downloads = Vec::new();
+    let mut coverage = Vec::new();
 
     for source_path in &source_paths {
         let file_started = Instant::now();
@@ -68,7 +72,20 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
             .map_err(|e| format!("Failed to read file '{}': {}", source_file, e))?;
 
         let lines = ime_parser::parse_ime_content(&content);
+        let rotation = detect_rotation_metadata(source_path);
         if lines.is_empty() {
+            coverage.push(CoverageAccumulator {
+                coverage: IntuneDiagnosticsFileCoverage {
+                    file_path: source_file.clone(),
+                    event_count: 0,
+                    download_count: 0,
+                    timestamp_bounds: None,
+                    is_rotated_segment: false,
+                    rotation_group: None,
+                },
+                rotation_candidate: rotation.rotation_group,
+                is_explicit_rotated_segment: rotation.is_rotated_segment,
+            });
             eprintln!(
                 "event=intune_analysis_file_complete file=\"{}\" line_count=0 event_count=0 download_count=0 elapsed_ms={}",
                 source_file,
@@ -79,6 +96,20 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
 
         let file_events = event_tracker::extract_events(&lines, &source_file);
         let file_downloads = download_stats::extract_downloads(&lines, &source_file);
+        let file_timestamp_bounds = build_timestamp_bounds(&file_events, &file_downloads);
+
+        coverage.push(CoverageAccumulator {
+            coverage: IntuneDiagnosticsFileCoverage {
+                file_path: source_file.clone(),
+                event_count: file_events.len() as u32,
+                download_count: file_downloads.len() as u32,
+                timestamp_bounds: file_timestamp_bounds,
+                is_rotated_segment: false,
+                rotation_group: None,
+            },
+            rotation_candidate: rotation.rotation_group,
+            is_explicit_rotated_segment: rotation.is_rotated_segment,
+        });
 
         eprintln!(
             "event=intune_analysis_file_complete file=\"{}\" line_count={} event_count={} download_count={} elapsed_ms={}",
@@ -117,6 +148,14 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
             log_time_span: None,
         };
         let diagnostics = build_diagnostics(&[], &all_downloads, &summary);
+        let diagnostics_coverage = finalize_coverage(coverage, &[], &all_downloads);
+        let repeated_failures = build_repeated_failures(&[]);
+        let diagnostics_confidence = build_diagnostics_confidence(
+            &summary,
+            &diagnostics_coverage,
+            &repeated_failures,
+            &[],
+        );
 
         eprintln!(
             "event=intune_analysis_complete path=\"{}\" source_count={} event_count=0 download_count={} diagnostics_count={} elapsed_ms={}",
@@ -134,12 +173,23 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
             diagnostics,
             source_file: path,
             source_files,
+            diagnostics_coverage,
+            diagnostics_confidence,
+            repeated_failures,
         });
     }
 
     let events = timeline::build_timeline(all_events);
     let summary = build_summary(&events, &all_downloads);
     let diagnostics = build_diagnostics(&events, &all_downloads, &summary);
+    let diagnostics_coverage = finalize_coverage(coverage, &events, &all_downloads);
+    let repeated_failures = build_repeated_failures(&events);
+    let diagnostics_confidence = build_diagnostics_confidence(
+        &summary,
+        &diagnostics_coverage,
+        &repeated_failures,
+        &events,
+    );
     let payload_chars: usize = events
         .iter()
         .map(|event| {
@@ -168,6 +218,699 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
         diagnostics,
         source_file: path,
         source_files,
+        diagnostics_coverage,
+        diagnostics_confidence,
+        repeated_failures,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct CoverageAccumulator {
+    coverage: IntuneDiagnosticsFileCoverage,
+    rotation_candidate: Option<String>,
+    is_explicit_rotated_segment: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RotationMetadata {
+    is_rotated_segment: bool,
+    rotation_group: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct TimestampCandidate {
+    parsed: chrono::NaiveDateTime,
+    raw: String,
+}
+
+#[derive(Debug, Clone)]
+struct FailureReason {
+    key: String,
+    display: String,
+}
+
+#[derive(Debug, Clone)]
+struct RepeatedFailureAccumulator {
+    name: String,
+    event_type: IntuneEventType,
+    error_code: Option<String>,
+    occurrences: u32,
+    source_files: HashSet<String>,
+    sample_event_ids: Vec<u64>,
+    earliest: Option<TimestampCandidate>,
+    latest: Option<TimestampCandidate>,
+    reason_display: String,
+}
+
+fn finalize_coverage(
+    mut coverage: Vec<CoverageAccumulator>,
+    events: &[IntuneEvent],
+    downloads: &[DownloadStat],
+) -> IntuneDiagnosticsCoverage {
+    let mut rotation_counts: HashMap<String, usize> = HashMap::new();
+    for file in &coverage {
+        if let Some(group) = &file.rotation_candidate {
+            *rotation_counts.entry(group.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let event_counts = count_events_by_source(events);
+    for file in &mut coverage {
+        if let Some(event_count) = event_counts.get(&file.coverage.file_path) {
+            file.coverage.event_count = *event_count;
+        }
+
+        if let Some(group) = &file.rotation_candidate {
+            if rotation_counts.get(group).copied().unwrap_or(0) > 1 {
+                file.coverage.rotation_group = Some(group.clone());
+                file.coverage.is_rotated_segment = file.is_explicit_rotated_segment;
+            }
+        }
+    }
+
+    let files: Vec<IntuneDiagnosticsFileCoverage> = coverage.into_iter().map(|file| file.coverage).collect();
+    let timestamp_bounds = merge_timestamp_bounds(files.iter().filter_map(|file| file.timestamp_bounds.as_ref()));
+    let has_rotated_logs = files.iter().any(|file| file.rotation_group.is_some());
+    let dominant_source = build_dominant_source(&files, events, downloads);
+
+    IntuneDiagnosticsCoverage {
+        files,
+        timestamp_bounds,
+        has_rotated_logs,
+        dominant_source,
+    }
+}
+
+fn count_events_by_source(events: &[IntuneEvent]) -> HashMap<String, u32> {
+    let mut counts = HashMap::new();
+
+    for event in events {
+        *counts.entry(event.source_file.clone()).or_insert(0) += 1;
+    }
+
+    counts
+}
+
+fn build_dominant_source(
+    files: &[IntuneDiagnosticsFileCoverage],
+    events: &[IntuneEvent],
+    _downloads: &[DownloadStat],
+) -> Option<IntuneDominantSource> {
+    let total_events = events.len() as f64;
+    let mut scores: HashMap<&str, u32> = HashMap::new();
+
+    for event in events {
+        *scores.entry(event.source_file.as_str()).or_insert(0) += event_signal_score(event);
+    }
+
+    for file in files {
+        if file.download_count > 0 {
+            *scores.entry(file.file_path.as_str()).or_insert(0) += file.download_count * 2;
+        }
+    }
+
+    let best = files
+        .iter()
+        .filter_map(|file| {
+            let score = scores.get(file.file_path.as_str()).copied().unwrap_or(0);
+            if score == 0 {
+                None
+            } else {
+                Some((file, score))
+            }
+        })
+        .max_by(|(left_file, left_score), (right_file, right_score)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| left_file.event_count.cmp(&right_file.event_count))
+                .then_with(|| left_file.download_count.cmp(&right_file.download_count))
+                .then_with(|| right_file.file_path.cmp(&left_file.file_path))
+        })?;
+
+    Some(IntuneDominantSource {
+        file_path: best.0.file_path.clone(),
+        event_count: best.0.event_count,
+        event_share: if total_events > 0.0 {
+            Some(((best.0.event_count as f64 / total_events) * 1000.0).round() / 1000.0)
+        } else {
+            None
+        },
+    })
+}
+
+fn event_signal_score(event: &IntuneEvent) -> u32 {
+    let status_weight = match event.status {
+        IntuneStatus::Failed | IntuneStatus::Timeout => 5,
+        IntuneStatus::Success => 2,
+        IntuneStatus::InProgress | IntuneStatus::Pending => 1,
+        IntuneStatus::Unknown => 1,
+    };
+    let type_weight = match event.event_type {
+        IntuneEventType::ContentDownload => 4,
+        IntuneEventType::Win32App | IntuneEventType::WinGetApp => 4,
+        IntuneEventType::PowerShellScript | IntuneEventType::Remediation => 4,
+        IntuneEventType::PolicyEvaluation => 3,
+        IntuneEventType::Esp | IntuneEventType::SyncSession => 1,
+        IntuneEventType::Other => 1,
+    };
+    let error_weight = if event.error_code.is_some() { 1 } else { 0 };
+
+    status_weight + type_weight + error_weight
+}
+
+fn build_timestamp_bounds(
+    events: &[IntuneEvent],
+    downloads: &[DownloadStat],
+) -> Option<IntuneTimestampBounds> {
+    let mut earliest: Option<TimestampCandidate> = None;
+    let mut latest: Option<TimestampCandidate> = None;
+
+    for event in events {
+        if let Some(timestamp) = event.start_time.as_deref() {
+            update_timestamp_candidate(&mut earliest, &mut latest, timestamp);
+        }
+
+        if let Some(timestamp) = event.end_time.as_deref() {
+            update_timestamp_candidate(&mut earliest, &mut latest, timestamp);
+        }
+    }
+
+    for download in downloads {
+        if let Some(timestamp) = download.timestamp.as_deref() {
+            update_timestamp_candidate(&mut earliest, &mut latest, timestamp);
+        }
+    }
+
+    match (earliest, latest) {
+        (Some(first), Some(last)) => Some(IntuneTimestampBounds {
+            first_timestamp: Some(first.raw),
+            last_timestamp: Some(last.raw),
+        }),
+        _ => None,
+    }
+}
+
+fn merge_timestamp_bounds<'a>(
+    bounds: impl Iterator<Item = &'a IntuneTimestampBounds>,
+) -> Option<IntuneTimestampBounds> {
+    let mut earliest: Option<TimestampCandidate> = None;
+    let mut latest: Option<TimestampCandidate> = None;
+
+    for bound in bounds {
+        if let Some(timestamp) = bound.first_timestamp.as_deref() {
+            update_timestamp_candidate(&mut earliest, &mut latest, timestamp);
+        }
+
+        if let Some(timestamp) = bound.last_timestamp.as_deref() {
+            update_timestamp_candidate(&mut earliest, &mut latest, timestamp);
+        }
+    }
+
+    match (earliest, latest) {
+        (Some(first), Some(last)) => Some(IntuneTimestampBounds {
+            first_timestamp: Some(first.raw),
+            last_timestamp: Some(last.raw),
+        }),
+        _ => None,
+    }
+}
+
+fn update_timestamp_candidate(
+    earliest: &mut Option<TimestampCandidate>,
+    latest: &mut Option<TimestampCandidate>,
+    value: &str,
+) {
+    let Some(parsed) = timeline::parse_timestamp(value) else {
+        return;
+    };
+
+    let candidate = TimestampCandidate {
+        parsed,
+        raw: value.to_string(),
+    };
+
+    match earliest {
+        Some(current)
+            if candidate.parsed > current.parsed
+                || (candidate.parsed == current.parsed && candidate.raw >= current.raw) => {}
+        _ => *earliest = Some(candidate.clone()),
+    }
+
+    match latest {
+        Some(current)
+            if candidate.parsed < current.parsed
+                || (candidate.parsed == current.parsed && candidate.raw <= current.raw) => {}
+        _ => *latest = Some(candidate),
+    }
+}
+
+fn detect_rotation_metadata(path: &Path) -> RotationMetadata {
+    let stem = path
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let segments = [".", "-", "_"];
+    for separator in segments {
+        if let Some((base, suffix)) = stem.rsplit_once(separator) {
+            if is_rotation_suffix(suffix) {
+                return RotationMetadata {
+                    is_rotated_segment: true,
+                    rotation_group: Some(base.to_ascii_lowercase()),
+                };
+            }
+        }
+    }
+
+    RotationMetadata {
+        is_rotated_segment: false,
+        rotation_group: Some(stem.to_ascii_lowercase()),
+    }
+}
+
+fn is_rotation_suffix(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if normalized.chars().all(|ch| ch.is_ascii_digit()) {
+        return true;
+    }
+
+    if normalized.starts_with("lo_") || normalized == "bak" || normalized == "old" {
+        return true;
+    }
+
+    normalized.len() == 8 && normalized.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn build_repeated_failures(events: &[IntuneEvent]) -> Vec<IntuneRepeatedFailureGroup> {
+    let mut groups: HashMap<String, RepeatedFailureAccumulator> = HashMap::new();
+
+    for event in events.iter().filter(|event| {
+        matches!(event.status, IntuneStatus::Failed | IntuneStatus::Timeout)
+    }) {
+        let reason = normalize_failure_reason(event);
+        let subject_key = event
+            .guid
+            .clone()
+            .unwrap_or_else(|| normalize_group_label(&event.name));
+        let key = format!(
+            "{:?}|{}|{}",
+            event.event_type,
+            subject_key,
+            reason.key
+        );
+
+        let entry = groups.entry(key).or_insert_with(|| RepeatedFailureAccumulator {
+            name: event.name.clone(),
+            event_type: event.event_type.clone(),
+            error_code: event.error_code.clone(),
+            occurrences: 0,
+            source_files: HashSet::new(),
+            sample_event_ids: Vec::new(),
+            earliest: None,
+            latest: None,
+            reason_display: reason.display.clone(),
+        });
+
+        entry.occurrences += 1;
+        entry.source_files.insert(event.source_file.clone());
+        if entry.sample_event_ids.len() < 5 {
+            entry.sample_event_ids.push(event.id);
+        }
+        if event.name.len() < entry.name.len() {
+            entry.name = event.name.clone();
+        }
+        if entry.error_code.is_none() {
+            entry.error_code = event.error_code.clone();
+        }
+        if let Some(timestamp) = event.start_time.as_deref().or(event.end_time.as_deref()) {
+            update_timestamp_candidate(&mut entry.earliest, &mut entry.latest, timestamp);
+        }
+    }
+
+    let mut repeated: Vec<IntuneRepeatedFailureGroup> = groups
+        .into_iter()
+        .filter_map(|(key, group)| {
+            if group.occurrences < 2 {
+                return None;
+            }
+
+            let mut source_files: Vec<String> = group.source_files.into_iter().collect();
+            source_files.sort();
+
+            let timestamp_bounds = match (group.earliest, group.latest) {
+                (Some(first), Some(last)) => Some(IntuneTimestampBounds {
+                    first_timestamp: Some(first.raw),
+                    last_timestamp: Some(last.raw),
+                }),
+                _ => None,
+            };
+
+            Some(IntuneRepeatedFailureGroup {
+                id: format!("repeated-{}", sanitize_identifier(&key)),
+                name: format!("{}: {}", group.name, group.reason_display),
+                event_type: group.event_type,
+                error_code: group.error_code,
+                occurrences: group.occurrences,
+                timestamp_bounds,
+                source_files,
+                sample_event_ids: group.sample_event_ids,
+            })
+        })
+        .collect();
+
+    repeated.sort_by(|left, right| {
+        right
+            .occurrences
+            .cmp(&left.occurrences)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    repeated
+}
+
+fn normalize_failure_reason(event: &IntuneEvent) -> FailureReason {
+    if let Some(error_code) = &event.error_code {
+        let lookup = lookup_error_code(error_code);
+        let display = if lookup.found {
+            format!("{} ({})", lookup.code_hex, lookup.description)
+        } else {
+            error_code.clone()
+        };
+
+        return FailureReason {
+            key: format!("code:{}", sanitize_identifier(error_code)),
+            display,
+        };
+    }
+
+    let detail = event.detail.to_ascii_lowercase();
+    let patterns = [
+        ("access is denied", "access is denied"),
+        ("permission denied", "permission denied"),
+        ("unauthorized", "unauthorized"),
+        ("not applicable", "not applicable"),
+        ("will not be enforced", "will not be enforced"),
+        ("requirement rule", "requirement rule blocked enforcement"),
+        ("detection rule", "detection rule blocked enforcement"),
+        ("hash validation failed", "hash validation failed"),
+        ("hash mismatch", "hash mismatch"),
+        ("cannot find path", "path not found"),
+        ("path not found", "path not found"),
+        ("file not found", "file not found"),
+        ("execution policy", "execution policy blocked execution"),
+        ("digitally signed", "script signing blocked execution"),
+        ("running scripts is disabled", "script execution is disabled"),
+        ("timed out", "timed out"),
+        ("timeout", "timed out"),
+        ("stalled", "stalled"),
+        ("retry exhausted", "retry exhausted"),
+        ("installer execution failed", "installer execution failed"),
+        ("failed to download", "download failed"),
+    ];
+
+    for (needle, label) in patterns {
+        if detail.contains(needle) {
+            return FailureReason {
+                key: sanitize_identifier(label),
+                display: label.to_string(),
+            };
+        }
+    }
+
+    let normalized = normalize_detail_snippet(&detail);
+    FailureReason {
+        key: sanitize_identifier(&normalized),
+        display: normalized,
+    }
+}
+
+fn normalize_detail_snippet(value: &str) -> String {
+    let mut words = Vec::new();
+
+    for token in value.split_whitespace() {
+        let cleaned: String = token
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+
+        if cleaned.is_empty() || cleaned.chars().all(|ch| ch.is_ascii_digit()) {
+            continue;
+        }
+
+        words.push(cleaned);
+        if words.len() >= 8 {
+            break;
+        }
+    }
+
+    if words.is_empty() {
+        "unspecified failure".to_string()
+    } else {
+        words.join(" ")
+    }
+}
+
+fn sanitize_identifier(value: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_dash = false;
+
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            ch.to_ascii_lowercase()
+        } else {
+            '-'
+        };
+
+        if mapped == '-' {
+            if !last_was_dash {
+                result.push(mapped);
+            }
+            last_was_dash = true;
+        } else {
+            result.push(mapped);
+            last_was_dash = false;
+        }
+    }
+
+    result.trim_matches('-').to_string()
+}
+
+fn build_diagnostics_confidence(
+    summary: &IntuneSummary,
+    coverage: &IntuneDiagnosticsCoverage,
+    repeated_failures: &[IntuneRepeatedFailureGroup],
+    events: &[IntuneEvent],
+) -> IntuneDiagnosticsConfidence {
+    if summary.total_events == 0 && summary.total_downloads == 0 {
+        return IntuneDiagnosticsConfidence {
+            level: IntuneDiagnosticsConfidenceLevel::Unknown,
+            score: None,
+            reasons: vec!["No Intune events or download evidence were available.".to_string()],
+        };
+    }
+
+    let mut score: f64 = 0.15;
+    let mut reasons = Vec::new();
+    let failed_events = events
+        .iter()
+        .filter(|event| matches!(event.status, IntuneStatus::Failed | IntuneStatus::Timeout))
+        .count();
+    let distinct_source_kinds = distinct_source_kinds(&coverage.files);
+    let contributing_files = coverage
+        .files
+        .iter()
+        .filter(|file| file.event_count > 0 || file.download_count > 0)
+        .count();
+
+    if summary.total_events >= 20 {
+        score += 0.25;
+        reasons.push(format!(
+            "{} events were extracted across the selected logs.",
+            summary.total_events
+        ));
+    } else if summary.total_events >= 8 {
+        score += 0.15;
+        reasons.push(format!(
+            "{} events were extracted across the selected logs.",
+            summary.total_events
+        ));
+    } else if summary.total_events > 0 {
+        score += 0.05;
+        reasons.push(format!(
+            "Only {} event(s) were extracted, so the evidence set is narrow.",
+            summary.total_events
+        ));
+    }
+
+    if failed_events >= 4 {
+        score += 0.2;
+        reasons.push(format!(
+            "{} failed or timed-out event(s) were available for review.",
+            failed_events
+        ));
+    } else if failed_events > 0 {
+        score += 0.1;
+        reasons.push(format!(
+            "{} failed or timed-out event(s) were available for review.",
+            failed_events
+        ));
+    }
+
+    if distinct_source_kinds >= 3 {
+        score += 0.2;
+        reasons.push(format!(
+            "Evidence spans {} distinct Intune log families.",
+            distinct_source_kinds
+        ));
+    } else if distinct_source_kinds == 2 {
+        score += 0.1;
+        reasons.push("Evidence spans two distinct Intune log families.".to_string());
+    }
+
+    if coverage.timestamp_bounds.is_some() {
+        score += 0.1;
+        reasons.push("Parsed timestamps were available for the overall diagnostics window.".to_string());
+    }
+
+    if !repeated_failures.is_empty() {
+        score += 0.15;
+        reasons.push(format!(
+            "{} repeated failure group(s) were identified deterministically.",
+            repeated_failures.len()
+        ));
+    }
+
+    if coverage.has_rotated_logs {
+        score += 0.05;
+        reasons.push("Rotated log segments were available, which improves continuity across retries.".to_string());
+    }
+
+    if contributing_files <= 1 {
+        score -= 0.15;
+        reasons.push("Evidence comes from a single contributing source file.".to_string());
+    }
+
+    if coverage.files.iter().any(|file| {
+        (file.event_count > 0 || file.download_count > 0) && file.timestamp_bounds.is_none()
+    }) {
+        score -= 0.1;
+        reasons.push("Some contributing files had no parseable timestamps, which weakens ordering confidence.".to_string());
+    }
+
+    if summary.total_events == 0 && summary.total_downloads > 0 {
+        score -= 0.2;
+        reasons.push("Only download statistics were available; no correlated Intune events were extracted.".to_string());
+    }
+
+    if summary.in_progress + summary.pending > summary.failed + summary.succeeded && summary.total_events > 0 {
+        score -= 0.1;
+        reasons.push("Most observed work is still pending or in progress, so the failure picture may be incomplete.".to_string());
+    }
+
+    if has_app_or_download_failures(events) && !has_source_kind(&coverage.files, "appworkload") {
+        score -= 0.15;
+        reasons.push("AppWorkload evidence was not available for app or download failures.".to_string());
+    }
+
+    if has_policy_failures(events) && !has_source_kind(&coverage.files, "appactionprocessor") {
+        score -= 0.15;
+        reasons.push("AppActionProcessor evidence was not available for applicability or policy failures.".to_string());
+    }
+
+    if has_script_failures(events)
+        && !has_source_kind(&coverage.files, "agentexecutor")
+        && !has_source_kind(&coverage.files, "healthscripts")
+    {
+        score -= 0.15;
+        reasons.push("AgentExecutor or HealthScripts evidence was not available for script-related failures.".to_string());
+    }
+
+    score = score.clamp(0.0, 1.0);
+    let level = if score >= 0.75 {
+        IntuneDiagnosticsConfidenceLevel::High
+    } else if score >= 0.45 {
+        IntuneDiagnosticsConfidenceLevel::Medium
+    } else {
+        IntuneDiagnosticsConfidenceLevel::Low
+    };
+
+    IntuneDiagnosticsConfidence {
+        level,
+        score: Some((score * 1000.0).round() / 1000.0),
+        reasons,
+    }
+}
+
+fn distinct_source_kinds(files: &[IntuneDiagnosticsFileCoverage]) -> usize {
+    let mut kinds = HashSet::new();
+
+    for file in files {
+        if file.event_count == 0 && file.download_count == 0 {
+            continue;
+        }
+
+        kinds.insert(source_kind_key(&file.file_path));
+    }
+
+    kinds.len()
+}
+
+fn has_source_kind(files: &[IntuneDiagnosticsFileCoverage], kind: &str) -> bool {
+    files.iter().any(|file| {
+        (file.event_count > 0 || file.download_count > 0) && source_kind_key(&file.file_path) == kind
+    })
+}
+
+fn source_kind_key(file_path: &str) -> &'static str {
+    let normalized = Path::new(file_path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| file_path.to_ascii_lowercase());
+
+    if normalized.contains("appworkload") {
+        "appworkload"
+    } else if normalized.contains("appactionprocessor") {
+        "appactionprocessor"
+    } else if normalized.contains("agentexecutor") {
+        "agentexecutor"
+    } else if normalized.contains("healthscripts") {
+        "healthscripts"
+    } else if normalized.contains("intunemanagementextension") {
+        "intunemanagementextension"
+    } else {
+        "other"
+    }
+}
+
+fn has_app_or_download_failures(events: &[IntuneEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(event.status, IntuneStatus::Failed | IntuneStatus::Timeout)
+            && matches!(
+                event.event_type,
+                IntuneEventType::Win32App | IntuneEventType::WinGetApp | IntuneEventType::ContentDownload
+            )
+    })
+}
+
+fn has_policy_failures(events: &[IntuneEvent]) -> bool {
+    events.iter().any(|event| {
+        event.event_type == IntuneEventType::PolicyEvaluation
+            && matches!(event.status, IntuneStatus::Failed | IntuneStatus::Timeout | IntuneStatus::Pending)
+    })
+}
+
+fn has_script_failures(events: &[IntuneEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(event.status, IntuneStatus::Failed | IntuneStatus::Timeout)
+            && matches!(
+                event.event_type,
+                IntuneEventType::PowerShellScript | IntuneEventType::Remediation
+            )
     })
 }
 
@@ -370,11 +1113,31 @@ fn build_diagnostics(
                 )
         })
         .collect();
+    let timed_out_events: Vec<&IntuneEvent> = events
+        .iter()
+        .filter(|event| event.status == IntuneStatus::Timeout)
+        .collect();
+    let script_failures: Vec<&IntuneEvent> = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                IntuneEventType::PowerShellScript | IntuneEventType::Remediation
+            ) && matches!(event.status, IntuneStatus::Failed | IntuneStatus::Timeout)
+        })
+        .collect();
+    let policy_events: Vec<&IntuneEvent> = events
+        .iter()
+        .filter(|event| {
+            event.event_type == IntuneEventType::PolicyEvaluation
+                && event.status != IntuneStatus::Success
+        })
+        .collect();
 
     if summary.failed_downloads > 0 {
         let download_case = classify_download_failure_case(&failed_download_events, downloads);
         let mut evidence = vec![format!(
-            "{} download attempt(s) ended in failure or retry exhaustion.",
+            "{} download attempt(s) ended in failure, stall, or retry exhaustion.",
             summary.failed_downloads
         )];
         evidence.extend(top_failed_download_labels(downloads, 2));
@@ -382,6 +1145,10 @@ fn build_diagnostics(
         if let Some(retries) = repeated_retry_evidence(&failed_download_events) {
             evidence.push(retries);
         }
+        if let Some(stall) = stalled_download_evidence(&failed_download_events) {
+            evidence.push(stall);
+        }
+        evidence.extend(repeated_group_evidence(&failed_download_events, 2, "Repeated failed download pattern"));
 
         insights.push(IntuneDiagnosticInsight {
             id: "download-failures".to_string(),
@@ -391,8 +1158,8 @@ fn build_diagnostics(
             evidence,
             next_checks: vec![
                 "Review AppWorkload download, staging, and hash-validation lines for the affected content IDs.".to_string(),
+                "Check whether the last download state is progressing, stalling, or immediately retrying for the same content.".to_string(),
                 "Verify Delivery Optimization, proxy, VPN, or content-source reachability on the device.".to_string(),
-                "Confirm the app payload is still available and matches the expected hash in Intune.".to_string(),
             ],
             suggested_fixes: download_case
                 .suggested_fixes
@@ -425,60 +1192,74 @@ fn build_diagnostics(
             evidence,
             next_checks: vec![
                 "Inspect AppWorkload install and enforcement rows near the failure for the last successful phase before the installer returned control.".to_string(),
-                "Compare the installer command, return code handling, and detection rule behavior for the affected app.".to_string(),
+                "Compare the installer command, return-code mapping, and detection rule behavior for the affected app.".to_string(),
                 "Correlate the failure with AgentExecutor or remediation activity if the deployment depends on prerequisite scripts.".to_string(),
             ],
             suggested_fixes: install_failure_suggested_fixes(install_hint),
         });
     }
 
-    let timed_out_events: Vec<&IntuneEvent> = events
-        .iter()
-        .filter(|event| event.status == IntuneStatus::Timeout)
-        .collect();
     if !timed_out_events.is_empty() {
+        let timeout_loops = repeated_failure_groups(&timed_out_events, 2);
         let mut evidence = vec![format!(
             "{} event(s) timed out before reporting a clean success or failure.",
             timed_out_events.len()
         )];
         evidence.extend(top_event_labels(&timed_out_events, 2));
+        evidence.extend(repeated_group_evidence(&timed_out_events, 2, "Timeout loop"));
+
+        let (title, summary) = if timeout_loops.is_empty() {
+            (
+                "Timed-out operations detected",
+                "One or more app or script operations stalled long enough to be treated as failures.",
+            )
+        } else {
+            (
+                "Repeated timeout loop detected",
+                "The same app or script path is timing out across multiple attempts, which suggests the retry cycle is repeating without a state change.",
+            )
+        };
+
+        let mut suggested_fixes = vec![
+            "Shorten or optimize long-running installers or scripts that routinely exceed the IME execution window.".to_string(),
+            "Remove dependencies on user interaction, mapped drives, or transient network resources during enforcement.".to_string(),
+        ];
+        if !timeout_loops.is_empty() {
+            suggested_fixes.push(
+                "Break the retry loop by fixing the underlying block before forcing another sync; repeated retries with the same timeout rarely self-heal.".to_string(),
+            );
+        } else {
+            suggested_fixes.push(
+                "If the timeout is expected during first install, validate whether the assignment deadline or retry cadence needs adjustment.".to_string(),
+            );
+        }
 
         insights.push(IntuneDiagnosticInsight {
             id: "operation-timeouts".to_string(),
             severity: IntuneDiagnosticSeverity::Error,
-            title: "Timed-out operations detected".to_string(),
-            summary: "One or more app or script operations stalled long enough to be treated as failures.".to_string(),
+            title: title.to_string(),
+            summary: summary.to_string(),
             evidence,
             next_checks: vec![
                 "Inspect the matching event rows around the timeout for the last successful phase before the stall.".to_string(),
-                "Check whether install commands, detection scripts, or remediation scripts are waiting on external resources or user state.".to_string(),
+                "Check whether install commands, detection scripts, or remediation scripts are waiting on external resources or device state.".to_string(),
                 "Look for repeated retries or follow-on failure codes in AppWorkload, AgentExecutor, or HealthScripts logs.".to_string(),
             ],
-            suggested_fixes: vec![
-                "Shorten or optimize long-running installers or scripts that routinely exceed the IME execution window.".to_string(),
-                "Remove dependencies on user interaction, mapped drives, or transient network resources during enforcement.".to_string(),
-                "If the timeout is expected during first install, validate whether the assignment deadline or retry cadence needs adjustment.".to_string(),
-            ],
+            suggested_fixes,
         });
     }
 
-    let script_failures: Vec<&IntuneEvent> = events
-        .iter()
-        .filter(|event| {
-            matches!(
-                event.event_type,
-                IntuneEventType::PowerShellScript | IntuneEventType::Remediation
-            ) && matches!(event.status, IntuneStatus::Failed | IntuneStatus::Timeout)
-        })
-        .collect();
     if !script_failures.is_empty() {
+        let script_hint = best_error_hint(&script_failures);
+        let script_case = classify_script_failure_case(&script_failures);
         let mut evidence = vec![format!(
             "{} script or remediation event(s) failed or timed out.",
             script_failures.len()
         )];
         evidence.extend(top_event_labels(&script_failures, 3));
         evidence.extend(top_event_detail_matches(&script_failures, 2));
-        let script_hint = best_error_hint(&script_failures);
+        evidence.extend(repeated_group_evidence(&script_failures, 2, "Recurring script failure"));
+        evidence.extend(script_scope_evidence(&script_failures));
         if let Some(error_hint) = &script_hint {
             evidence.push(format!(
                 "Most specific script error observed: {} ({})",
@@ -489,67 +1270,47 @@ fn build_diagnostics(
         insights.push(IntuneDiagnosticInsight {
             id: "script-failures".to_string(),
             severity: IntuneDiagnosticSeverity::Error,
-            title: "Script execution failures detected".to_string(),
-            summary: "Detection or remediation logic returned a non-zero outcome or never completed, which can block compliance or app enforcement.".to_string(),
+            title: script_case.title.to_string(),
+            summary: script_case.summary.to_string(),
             evidence,
             next_checks: vec![
                 "Review AgentExecutor and HealthScripts entries for stdout, stderr, and explicit exit-code lines around the affected script.".to_string(),
                 "Separate detection-script failures from remediation-script failures before deciding whether the issue is logic, environment, or permissions.".to_string(),
-                "Validate script prerequisites such as execution context, file paths, and any required network or service dependencies.".to_string(),
+                "Validate script prerequisites such as execution context, file paths, network access, and required modules or commands.".to_string(),
             ],
             suggested_fixes: script_failure_suggested_fixes(&script_failures, script_hint),
         });
     }
 
-    let policy_events: Vec<&IntuneEvent> = events
-        .iter()
-        .filter(|event| {
-            event.event_type == IntuneEventType::PolicyEvaluation
-                && event.status != IntuneStatus::Success
-        })
-        .collect();
     if !policy_events.is_empty() {
+        let policy_case = classify_policy_failure_case(&policy_events);
         let mut evidence = vec![format!(
             "{} policy or applicability event(s) did not end in success.",
             policy_events.len()
         )];
         evidence.extend(top_event_labels(&policy_events, 2));
         evidence.extend(top_event_detail_matches(&policy_events, 2));
-        let not_applicable = policy_events
-            .iter()
-            .any(|event| contains_any(&event.detail, &["not applicable", "requirement rule", "detection rule"]));
+        evidence.extend(repeated_group_evidence(&policy_events, 2, "Repeated policy block"));
+        if let Some(reason) = applicability_reason_evidence(&policy_events) {
+            evidence.push(reason);
+        }
 
         insights.push(IntuneDiagnosticInsight {
             id: "policy-applicability".to_string(),
             severity: IntuneDiagnosticSeverity::Warning,
-            title: if not_applicable {
-                "Applicability or requirement rules blocked enforcement".to_string()
-            } else {
-                "Policy applicability needs review".to_string()
-            },
-            summary: if not_applicable {
-                "The deployment appears to be present in policy evaluation, but requirement or detection logic is stopping enforcement from continuing.".to_string()
-            } else {
-                "Assignment or applicability evaluation may be preventing enforcement even when content and scripts are available.".to_string()
-            },
+            title: policy_case.title.to_string(),
+            summary: policy_case.summary.to_string(),
             evidence,
             next_checks: vec![
                 "Review AppActionProcessor requirement-rule, detection-rule, and applicability lines for the affected app GUIDs.".to_string(),
                 "Confirm the assignment intent, targeting, and any deadline or GRS behavior for the device or user.".to_string(),
                 "Correlate policy-evaluation events with the later AppWorkload or AgentExecutor phases to see where enforcement stopped.".to_string(),
             ],
-            suggested_fixes: if not_applicable {
-                vec![
-                    "Correct requirement-rule logic so the targeted device actually qualifies for the deployment.".to_string(),
-                    "Verify that the detection rule is not falsely reporting the app as already present or already compliant.".to_string(),
-                    "If the app should not target this device, adjust the assignment scope instead of forcing enforcement.".to_string(),
-                ]
-            } else {
-                vec![
-                    "Review assignment targeting, intent, and any deadlines or retry windows for the affected policy.".to_string(),
-                    "Validate that prerequisite policies or dependent apps are not blocking the enforcement path.".to_string(),
-                ]
-            },
+            suggested_fixes: policy_case
+                .suggested_fixes
+                .into_iter()
+                .map(|item| item.to_string())
+                .collect(),
         });
     }
 
@@ -618,6 +1379,7 @@ fn top_failed_download_labels(downloads: &[DownloadStat], limit: usize) -> Vec<S
     labels
 }
 
+#[derive(Clone)]
 struct ErrorHint {
     code: String,
     description: String,
@@ -633,6 +1395,24 @@ fn classify_download_failure_case(
     events: &[&IntuneEvent],
     downloads: &[DownloadStat],
 ) -> DownloadFailureCase {
+    if events.iter().any(|event| {
+        event.status == IntuneStatus::Timeout
+            || contains_any(
+                &event.detail,
+                &["stalled", "not progressing", "no progress", "timed out", "timeout"],
+            )
+    }) {
+        return DownloadFailureCase {
+            title: "Content download stalled or timed out",
+            summary: "The device started content acquisition, but AppWorkload shows the same payload stopping without forward progress before install-ready staging completed.",
+            suggested_fixes: vec![
+                "Check for content-transfer stalls, Delivery Optimization blockage, or proxy/VPN interference before forcing another retry.",
+                "If the same content repeatedly stalls, clear stale IME cache state on the test device and retry with fresh logs.",
+                "Confirm the content source is reachable and the payload revision is still available in Intune.",
+            ],
+        };
+    }
+
     if events
         .iter()
         .any(|event| contains_any(&event.detail, &["hash validation", "hash mismatch", "hash"]))
@@ -659,6 +1439,18 @@ fn classify_download_failure_case(
                 "Validate local disk space and permissions on the IME content cache path.",
                 "Retry with a fresh content download if cached payloads appear stale or partially written.",
                 "Check antivirus or endpoint protection exclusions if staging repeatedly stops after the download completes.",
+            ],
+        };
+    }
+
+    if repeated_retry_evidence(events).is_some() {
+        return DownloadFailureCase {
+            title: "Content download is retrying without completing",
+            summary: "The same content is cycling through retry attempts, which points to a persistent transfer or staging blocker instead of a one-off transient miss.",
+            suggested_fixes: vec![
+                "Review the first failed download attempt for the real cause instead of focusing only on the later retry lines.",
+                "Validate network path, Delivery Optimization policy, and local cache health before forcing additional sync cycles.",
+                "If retries begin after partial transfer, re-stage the content with a fresh package revision or cache reset on the test device.",
             ],
         };
     }
@@ -709,6 +1501,142 @@ fn best_error_hint(events: &[&IntuneEvent]) -> Option<ErrorHint> {
     None
 }
 
+struct ScriptFailureCase {
+    title: &'static str,
+    summary: &'static str,
+}
+
+fn classify_script_failure_case(events: &[&IntuneEvent]) -> ScriptFailureCase {
+    if events.iter().any(|event| {
+        contains_any(
+            &event.detail,
+            &[
+                "execution policy",
+                "digitally signed",
+                "running scripts is disabled",
+            ],
+        )
+    }) {
+        return ScriptFailureCase {
+            title: "Script execution policy or signing blocked execution",
+            summary: "The script did not fail inside its own logic; PowerShell policy or signing requirements blocked it before it could run normally.",
+        };
+    }
+
+    if events.iter().any(|event| {
+        contains_any(
+            &event.detail,
+            &["access is denied", "unauthorized", "permission denied"],
+        )
+    }) {
+        return ScriptFailureCase {
+            title: "Script execution failed due to permissions or access",
+            summary: "The script path is being reached, but the execution context does not have access to one or more required resources.",
+        };
+    }
+
+    if events.iter().any(|event| {
+        contains_any(
+            &event.detail,
+            &[
+                "cannot find path",
+                "path not found",
+                "file not found",
+                "module",
+                "not recognized",
+            ],
+        )
+    }) {
+        return ScriptFailureCase {
+            title: "Script dependency or path resolution failed",
+            summary: "The script is calling a path, command, or module that is not available in the IME execution context on the device.",
+        };
+    }
+
+    if events.iter().any(|event| {
+        contains_any(&event.detail, &["parsererror", "syntax error", "exception"])
+    }) {
+        return ScriptFailureCase {
+            title: "Script syntax or runtime errors detected",
+            summary: "The script started but then failed because of a parser, command, or runtime error rather than a packaging or download issue.",
+        };
+    }
+
+    if repeated_failure_groups(events, 2).is_empty() {
+        ScriptFailureCase {
+            title: "Script execution failures detected",
+            summary: "Detection or remediation logic returned a non-zero outcome or never completed, which can block compliance or app enforcement.",
+        }
+    } else {
+        ScriptFailureCase {
+            title: "Recurring script or remediation failures detected",
+            summary: "The same detection or remediation path is failing across multiple attempts, which points to a persistent script issue instead of a one-time transient failure.",
+        }
+    }
+}
+
+struct PolicyFailureCase {
+    title: &'static str,
+    summary: &'static str,
+    suggested_fixes: Vec<&'static str>,
+}
+
+fn classify_policy_failure_case(events: &[&IntuneEvent]) -> PolicyFailureCase {
+    if events
+        .iter()
+        .any(|event| contains_any(&event.detail, &["not applicable", "will not be enforced"]))
+    {
+        return PolicyFailureCase {
+            title: "Applicability blocked enforcement",
+            summary: "AppActionProcessor shows the deployment was evaluated, but the app was rejected as not applicable before enforcement could continue.",
+            suggested_fixes: vec![
+                "Review assignment targeting and applicability conditions to confirm the device should actually qualify.",
+                "If the device should be included, correct the applicability logic instead of forcing repeated retries.",
+                "If the device should not be targeted, adjust the assignment scope so the block is intentional and reviewable.",
+            ],
+        };
+    }
+
+    if events
+        .iter()
+        .any(|event| contains_any(&event.detail, &["requirement rule", "requirements"]))
+    {
+        return PolicyFailureCase {
+            title: "Requirement rules blocked enforcement",
+            summary: "The assignment reached policy evaluation, but a requirement-rule decision prevented the app from entering the enforcement path.",
+            suggested_fixes: vec![
+                "Validate every requirement-rule input on the affected device, especially OS version, architecture, and custom script results.",
+                "Re-test the rule with the same device context that IME uses instead of assuming portal targeting is enough.",
+                "Simplify overly broad requirement logic if it is masking the real intended eligibility check.",
+            ],
+        };
+    }
+
+    if events
+        .iter()
+        .any(|event| contains_any(&event.detail, &["detection rule", "detected", "already installed"]))
+    {
+        return PolicyFailureCase {
+            title: "Detection-state evidence blocked enforcement",
+            summary: "AppActionProcessor indicates the deployment was evaluated, but detection-state logic made IME treat the app as already present or otherwise not needing enforcement.",
+            suggested_fixes: vec![
+                "Verify that the detection rule is not falsely reporting success on the affected device.",
+                "Compare detection-rule logic with the actual install footprint created by the package.",
+                "If the app is truly installed, adjust the deployment intent instead of forcing another enforcement attempt.",
+            ],
+        };
+    }
+
+    PolicyFailureCase {
+        title: "Policy applicability needs review",
+        summary: "Assignment or applicability evaluation may be preventing enforcement even when content and scripts are available.",
+        suggested_fixes: vec![
+            "Review assignment targeting, intent, and any deadlines or retry windows for the affected policy.",
+            "Validate that prerequisite policies or dependent apps are not blocking the enforcement path.",
+        ],
+    }
+}
+
 fn install_failure_suggested_fixes(error_hint: Option<ErrorHint>) -> Vec<String> {
     let mut fixes = vec![
         "Validate the install command line, return-code mapping, and required install context for the affected app.".to_string(),
@@ -754,6 +1682,36 @@ fn script_failure_suggested_fixes(
     if remediation_failures {
         fixes.push(
             "If remediation failed, validate every command path and dependency under the same execution context IME uses on the device.".to_string(),
+        );
+    }
+
+    if events.iter().any(|event| {
+        contains_any(
+            &event.detail,
+            &["execution policy", "digitally signed", "running scripts is disabled"],
+        )
+    }) {
+        fixes.push(
+            "Adjust script signing or execution-policy handling so the script can run in the target IME context without bypass-only workarounds.".to_string(),
+        );
+    }
+
+    if events.iter().any(|event| {
+        contains_any(
+            &event.detail,
+            &["cannot find path", "path not found", "file not found", "module", "not recognized"],
+        )
+    }) {
+        fixes.push(
+            "Package all required script dependencies locally and validate every referenced command, module, and path under the exact IME context.".to_string(),
+        );
+    }
+
+    if events.iter().any(|event| event.status == IntuneStatus::Timeout)
+        || !repeated_failure_groups(events, 2).is_empty()
+    {
+        fixes.push(
+            "Stop repeated retry cycles until the blocking condition is fixed; recurring timeouts usually indicate the same script path is hanging on every attempt.".to_string(),
         );
     }
 
@@ -820,6 +1778,158 @@ fn repeated_retry_evidence(events: &[&IntuneEvent]) -> Option<String> {
     }
 }
 
+fn stalled_download_evidence(events: &[&IntuneEvent]) -> Option<String> {
+    let stall_count = events
+        .iter()
+        .filter(|event| {
+            event.status == IntuneStatus::Timeout
+                || contains_any(
+                    &event.detail,
+                    &["stalled", "not progressing", "no progress", "timed out", "timeout"],
+                )
+        })
+        .count();
+
+    if stall_count > 0 {
+        Some(format!(
+            "Stall or timeout evidence was observed in {} failed download event(s).",
+            stall_count
+        ))
+    } else {
+        None
+    }
+}
+
+fn applicability_reason_evidence(events: &[&IntuneEvent]) -> Option<String> {
+    if events
+        .iter()
+        .any(|event| contains_any(&event.detail, &["not applicable", "will not be enforced"]))
+    {
+        return Some(
+            "AppActionProcessor explicitly reported the app as not applicable or not enforceable for the evaluated target.".to_string(),
+        );
+    }
+
+    if events
+        .iter()
+        .any(|event| contains_any(&event.detail, &["requirement rule", "requirements"]))
+    {
+        return Some(
+            "Requirement-rule evidence appears in the policy-evaluation flow for the affected app.".to_string(),
+        );
+    }
+
+    if events
+        .iter()
+        .any(|event| contains_any(&event.detail, &["detection rule", "already installed", "detected"]))
+    {
+        return Some(
+            "Detection-rule evidence appears to be short-circuiting enforcement for the affected app.".to_string(),
+        );
+    }
+
+    None
+}
+
+fn script_scope_evidence(events: &[&IntuneEvent]) -> Vec<String> {
+    let detection_count = events
+        .iter()
+        .filter(|event| contains_any(&event.name, &["detection script", "detection"]))
+        .count();
+    let remediation_count = events
+        .iter()
+        .filter(|event| contains_any(&event.name, &["remediation script", "remediation"]))
+        .count();
+    let mut evidence = Vec::new();
+
+    if detection_count > 0 {
+        evidence.push(format!(
+            "Detection-script failures observed: {} event(s).",
+            detection_count
+        ));
+    }
+    if remediation_count > 0 {
+        evidence.push(format!(
+            "Remediation-script failures observed: {} event(s).",
+            remediation_count
+        ));
+    }
+
+    evidence
+}
+
+fn repeated_group_evidence(
+    events: &[&IntuneEvent],
+    minimum_occurrences: usize,
+    prefix: &str,
+) -> Vec<String> {
+    repeated_failure_groups(events, minimum_occurrences)
+        .into_iter()
+        .map(|group| format!("{}: {} ({} occurrence(s)).", prefix, group.label, group.occurrences))
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct RepeatedFailureGroup {
+    label: String,
+    occurrences: usize,
+}
+
+fn repeated_failure_groups(
+    events: &[&IntuneEvent],
+    minimum_occurrences: usize,
+) -> Vec<RepeatedFailureGroup> {
+    let mut counts: HashMap<String, (String, usize)> = HashMap::new();
+
+    for event in events {
+        let key = if let Some(guid) = &event.guid {
+            format!("{}|{:?}|{}", event.source_file, event.event_type, guid)
+        } else {
+            format!("{}|{:?}|{}", event.source_file, event.event_type, normalize_group_label(&event.name))
+        };
+
+        let entry = counts.entry(key).or_insert_with(|| (event.name.clone(), 0));
+        entry.1 += 1;
+    }
+
+    let mut groups: Vec<RepeatedFailureGroup> = counts
+        .into_values()
+        .filter_map(|(label, occurrences)| {
+            if occurrences >= minimum_occurrences {
+                Some(RepeatedFailureGroup { label, occurrences })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    groups.sort_by(|left, right| {
+        right
+            .occurrences
+            .cmp(&left.occurrences)
+            .then_with(|| left.label.cmp(&right.label))
+    });
+    groups.truncate(2);
+    groups
+}
+
+fn normalize_group_label(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .take(8)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn contains_any(value: &str, terms: &[&str]) -> bool {
     let normalized = value.to_ascii_lowercase();
     terms.iter().any(|term| normalized.contains(&term.to_ascii_lowercase()))
@@ -849,10 +1959,13 @@ fn top_event_labels(events: &[&IntuneEvent], limit: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_diagnostics, collect_input_paths};
+    use super::{
+        build_diagnostics, build_diagnostics_confidence, build_repeated_failures,
+        build_timestamp_bounds, collect_input_paths, finalize_coverage, CoverageAccumulator,
+    };
     use crate::intune::models::{
-        DownloadStat, IntuneDiagnosticSeverity, IntuneEvent, IntuneEventType, IntuneStatus,
-        IntuneSummary,
+        DownloadStat, IntuneDiagnosticSeverity, IntuneDiagnosticsConfidenceLevel,
+        IntuneDiagnosticsFileCoverage, IntuneEvent, IntuneEventType, IntuneStatus, IntuneSummary,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -1046,5 +2159,194 @@ mod tests {
             .suggested_fixes
             .iter()
             .any(|item| item.contains("same system or user context")));
+    }
+
+    #[test]
+    fn build_repeated_failures_groups_same_reason_across_rotated_logs() {
+        let events = vec![
+            IntuneEvent {
+                id: 1,
+                event_type: IntuneEventType::Win32App,
+                name: "Contoso App Install".to_string(),
+                guid: Some("app-1".to_string()),
+                status: IntuneStatus::Failed,
+                start_time: Some("01-15-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: Some("0x80070005".to_string()),
+                detail: "Installer execution failed with error code: 0x80070005".to_string(),
+                source_file: "C:/Logs/AppWorkload.log".to_string(),
+                line_number: 12,
+            },
+            IntuneEvent {
+                id: 2,
+                event_type: IntuneEventType::Win32App,
+                name: "Contoso App Install".to_string(),
+                guid: Some("app-1".to_string()),
+                status: IntuneStatus::Failed,
+                start_time: Some("01-15-2024 10:05:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: Some("0x80070005".to_string()),
+                detail: "Installer execution failed with error code: 0x80070005".to_string(),
+                source_file: "C:/Logs/AppWorkload-1.log".to_string(),
+                line_number: 18,
+            },
+        ];
+
+        let repeated = build_repeated_failures(&events);
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(repeated[0].occurrences, 2);
+        assert_eq!(repeated[0].source_files.len(), 2);
+        assert!(repeated[0].name.contains("Contoso App Install"));
+        assert!(repeated[0].name.contains("Access is denied") || repeated[0].name.contains("0x80070005"));
+    }
+
+    #[test]
+    fn finalize_coverage_marks_rotation_and_dominant_source() {
+        let coverage = vec![
+            CoverageAccumulator {
+                coverage: IntuneDiagnosticsFileCoverage {
+                    file_path: "C:/Logs/AppWorkload.log".to_string(),
+                    event_count: 1,
+                    download_count: 1,
+                    timestamp_bounds: None,
+                    is_rotated_segment: false,
+                    rotation_group: None,
+                },
+                rotation_candidate: Some("appworkload".to_string()),
+                is_explicit_rotated_segment: false,
+            },
+            CoverageAccumulator {
+                coverage: IntuneDiagnosticsFileCoverage {
+                    file_path: "C:/Logs/AppWorkload-1.log".to_string(),
+                    event_count: 1,
+                    download_count: 0,
+                    timestamp_bounds: None,
+                    is_rotated_segment: false,
+                    rotation_group: None,
+                },
+                rotation_candidate: Some("appworkload".to_string()),
+                is_explicit_rotated_segment: true,
+            },
+        ];
+        let events = vec![IntuneEvent {
+            id: 1,
+            event_type: IntuneEventType::ContentDownload,
+            name: "Download".to_string(),
+            guid: None,
+            status: IntuneStatus::Failed,
+            start_time: Some("01-15-2024 10:00:00.000".to_string()),
+            end_time: None,
+            duration_secs: None,
+            error_code: None,
+            detail: "download failed".to_string(),
+            source_file: "C:/Logs/AppWorkload.log".to_string(),
+            line_number: 8,
+        }];
+        let downloads = vec![DownloadStat {
+            content_id: "content-1".to_string(),
+            name: "Payload".to_string(),
+            size_bytes: 10,
+            speed_bps: 1.0,
+            do_percentage: 0.0,
+            duration_secs: 5.0,
+            success: false,
+            timestamp: Some("01-15-2024 10:00:00.000".to_string()),
+        }];
+
+        let finalized = finalize_coverage(coverage, &events, &downloads);
+
+        assert!(finalized.has_rotated_logs);
+        assert_eq!(finalized.files[0].rotation_group.as_deref(), Some("appworkload"));
+        assert!(finalized.files[1].is_rotated_segment);
+        assert_eq!(finalized.dominant_source.as_ref().map(|item| item.file_path.as_str()), Some("C:/Logs/AppWorkload.log"));
+    }
+
+    #[test]
+    fn build_confidence_penalizes_missing_sidecars() {
+        let summary = IntuneSummary {
+            total_events: 2,
+            win32_apps: 1,
+            winget_apps: 0,
+            scripts: 0,
+            remediations: 0,
+            succeeded: 0,
+            failed: 1,
+            in_progress: 1,
+            pending: 0,
+            timed_out: 0,
+            total_downloads: 0,
+            successful_downloads: 0,
+            failed_downloads: 0,
+            failed_scripts: 0,
+            log_time_span: None,
+        };
+        let coverage = crate::intune::models::IntuneDiagnosticsCoverage {
+            files: vec![IntuneDiagnosticsFileCoverage {
+                file_path: "C:/Logs/IntuneManagementExtension.log".to_string(),
+                event_count: 2,
+                download_count: 0,
+                timestamp_bounds: build_timestamp_bounds(
+                    &[IntuneEvent {
+                        id: 1,
+                        event_type: IntuneEventType::Win32App,
+                        name: "Contoso App".to_string(),
+                        guid: None,
+                        status: IntuneStatus::Failed,
+                        start_time: Some("01-15-2024 10:00:00.000".to_string()),
+                        end_time: None,
+                        duration_secs: None,
+                        error_code: None,
+                        detail: "install failed".to_string(),
+                        source_file: "C:/Logs/IntuneManagementExtension.log".to_string(),
+                        line_number: 12,
+                    }],
+                    &[],
+                ),
+                is_rotated_segment: false,
+                rotation_group: None,
+            }],
+            timestamp_bounds: None,
+            has_rotated_logs: false,
+            dominant_source: None,
+        };
+        let events = vec![
+            IntuneEvent {
+                id: 1,
+                event_type: IntuneEventType::Win32App,
+                name: "Contoso App".to_string(),
+                guid: None,
+                status: IntuneStatus::Failed,
+                start_time: Some("01-15-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "install failed".to_string(),
+                source_file: "C:/Logs/IntuneManagementExtension.log".to_string(),
+                line_number: 12,
+            },
+            IntuneEvent {
+                id: 2,
+                event_type: IntuneEventType::Win32App,
+                name: "Contoso App".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("01-15-2024 10:05:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "install in progress".to_string(),
+                source_file: "C:/Logs/IntuneManagementExtension.log".to_string(),
+                line_number: 20,
+            },
+        ];
+
+        let confidence = build_diagnostics_confidence(&summary, &coverage, &[], &events);
+        assert_eq!(confidence.level, IntuneDiagnosticsConfidenceLevel::Low);
+        assert!(confidence
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("AppWorkload evidence was not available")));
     }
 }

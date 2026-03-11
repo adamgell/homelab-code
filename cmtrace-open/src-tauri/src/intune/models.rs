@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 
 /// Severity level for generated diagnostic guidance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -99,8 +99,91 @@ pub struct DownloadStat {
     pub timestamp: Option<String>,
 }
 
-/// Complete result of Intune log analysis.
+/// Inclusive timestamp bounds captured from analyzed content.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IntuneTimestampBounds {
+    pub first_timestamp: Option<String>,
+    pub last_timestamp: Option<String>,
+}
+
+/// Coverage metrics for a single analyzed source file.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IntuneDiagnosticsFileCoverage {
+    pub file_path: String,
+    pub event_count: u32,
+    pub download_count: u32,
+    pub timestamp_bounds: Option<IntuneTimestampBounds>,
+    #[serde(default)]
+    pub is_rotated_segment: bool,
+    pub rotation_group: Option<String>,
+}
+
+/// Summary of which files and time ranges contributed to diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IntuneDiagnosticsCoverage {
+    #[serde(default)]
+    pub files: Vec<IntuneDiagnosticsFileCoverage>,
+    pub timestamp_bounds: Option<IntuneTimestampBounds>,
+    #[serde(default)]
+    pub has_rotated_logs: bool,
+    pub dominant_source: Option<IntuneDominantSource>,
+}
+
+/// Primary source contributing to the current diagnostics result.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IntuneDominantSource {
+    pub file_path: String,
+    pub event_count: u32,
+    pub event_share: Option<f64>,
+}
+
+/// Confidence bucket for the generated diagnostics result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum IntuneDiagnosticsConfidenceLevel {
+    Unknown,
+    Low,
+    Medium,
+    High,
+}
+
+impl Default for IntuneDiagnosticsConfidenceLevel {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+/// Confidence metadata for the generated diagnostics result.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct IntuneDiagnosticsConfidence {
+    pub level: IntuneDiagnosticsConfidenceLevel,
+    pub score: Option<f64>,
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+/// Grouped repeated failures for follow-on diagnostics phases.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IntuneRepeatedFailureGroup {
+    pub id: String,
+    pub name: String,
+    pub event_type: IntuneEventType,
+    pub error_code: Option<String>,
+    pub occurrences: u32,
+    pub timestamp_bounds: Option<IntuneTimestampBounds>,
+    #[serde(default)]
+    pub source_files: Vec<String>,
+    #[serde(default)]
+    pub sample_event_ids: Vec<u64>,
+}
+
+/// Complete result of Intune log analysis.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IntuneAnalysisResult {
     /// All detected events
@@ -117,6 +200,34 @@ pub struct IntuneAnalysisResult {
     /// Expanded source files included in this result.
     #[serde(default)]
     pub source_files: Vec<String>,
+    /// Coverage metadata behind the diagnostics contract.
+    #[serde(default)]
+    pub diagnostics_coverage: IntuneDiagnosticsCoverage,
+    /// Confidence metadata behind the diagnostics contract.
+    #[serde(default)]
+    pub diagnostics_confidence: IntuneDiagnosticsConfidence,
+    /// Grouped repeated failures behind the diagnostics contract.
+    #[serde(default)]
+    pub repeated_failures: Vec<IntuneRepeatedFailureGroup>,
+}
+
+impl Serialize for IntuneAnalysisResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("IntuneAnalysisResult", 9)?;
+        state.serialize_field("events", &self.events)?;
+        state.serialize_field("downloads", &self.downloads)?;
+        state.serialize_field("summary", &self.summary)?;
+        state.serialize_field("diagnostics", &self.diagnostics)?;
+        state.serialize_field("sourceFile", &self.source_file)?;
+        state.serialize_field("sourceFiles", &self.source_files)?;
+        state.serialize_field("diagnosticsCoverage", &self.diagnostics_coverage)?;
+        state.serialize_field("diagnosticsConfidence", &self.diagnostics_confidence)?;
+        state.serialize_field("repeatedFailures", &self.repeated_failures)?;
+        state.end()
+    }
 }
 
 /// Summary statistics from Intune analysis.
