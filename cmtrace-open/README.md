@@ -94,6 +94,31 @@ You can also run the PowerShell entrypoint directly:
 
 Pass `-InstallDependencies` to force `npm install` before launching. The launcher automatically resolves the latest installed Visual Studio instance with C++ build tools, enters its Developer PowerShell environment, and then runs the appropriate Tauri command.
 
+### macOS launcher
+
+If you want a shell entrypoint on macOS with the same `Dev`, `Build`, and `BuildAndRun` modes, use the included Bash launcher:
+
+```bash
+# Run in development mode with Vite hot reload
+./Launch-CMTraceOpen.sh
+
+# Build the production app bundle
+./Launch-CMTraceOpen.sh build
+
+# Build the production app bundle and open the .app
+./Launch-CMTraceOpen.sh build-and-run
+```
+
+You can also run the script directly:
+
+```bash
+./scripts/Launch-CMTraceOpen.sh --mode dev
+./scripts/Launch-CMTraceOpen.sh --mode build
+./scripts/Launch-CMTraceOpen.sh --mode build-and-run
+```
+
+Pass `--install-dependencies` to force `npm install` before launching. The launcher accepts both lowercase (`dev`, `build`, `build-and-run`) and the original PascalCase mode names. `Dev` mode runs `npm run tauri dev`, so frontend changes use Vite hot reload and Tauri will rebuild/relaunch as needed for native code changes.
+
 ### Build Output
 
 Production builds are located at:
