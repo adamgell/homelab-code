@@ -1,5 +1,24 @@
 export type Severity = "Info" | "Warning" | "Error";
 export type LogFormat = "Ccm" | "Simple" | "Plain" | "Timestamped";
+export type ParserKind =
+  | "ccm"
+  | "simple"
+  | "timestamped"
+  | "plain"
+  | "panther"
+  | "cbs"
+  | "dism"
+  | "reportingEvents";
+export type ParserImplementation =
+  | "ccm"
+  | "simple"
+  | "genericTimestamped"
+  | "reportingEvents"
+  | "plainText";
+export type ParserProvenance = "dedicated" | "heuristic" | "fallback";
+export type ParseQuality = "structured" | "semiStructured" | "textFallback";
+export type RecordFraming = "physicalLine" | "logicalRecord";
+export type DateFieldOrder = "monthFirst" | "dayFirst";
 
 export type LogSourceKind = "file" | "folder" | "known";
 export type KnownSourcePathKind = "file" | "folder";
@@ -82,9 +101,19 @@ export interface LogEntry {
   timezoneOffset: number | null;
 }
 
+export interface ParserSelectionInfo {
+  parser: ParserKind;
+  implementation: ParserImplementation;
+  provenance: ParserProvenance;
+  parseQuality: ParseQuality;
+  recordFraming: RecordFraming;
+  dateOrder: DateFieldOrder | null;
+}
+
 export interface ParseResult {
   entries: LogEntry[];
   formatDetected: LogFormat;
+  parserSelection: ParserSelectionInfo;
   totalLines: number;
   parseErrors: number;
   filePath: string;
@@ -96,4 +125,5 @@ export interface ParseResult {
 export interface TailPayload {
   entries: LogEntry[];
   filePath: string;
+  parserSelection?: ParserSelectionInfo;
 }

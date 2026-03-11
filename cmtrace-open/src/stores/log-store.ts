@@ -5,6 +5,7 @@ import type {
   LogEntry,
   LogFormat,
   LogSource,
+  ParserSelectionInfo,
 } from "../types/log";
 
 export type SourceStatusKind =
@@ -33,6 +34,15 @@ export interface KnownSourceToolbarGroup {
 export interface StreamStateSnapshot {
   mode: "idle" | "loading" | "live" | "paused";
   label: string;
+}
+
+export interface ParserSelectionDisplay {
+  parserLabel: string;
+  implementationLabel: string;
+  provenanceLabel: string;
+  qualityLabel: string;
+  framingLabel: string;
+  dateOrderLabel: string | null;
 }
 
 type FindDirection = "forward" | "backward";
@@ -180,6 +190,107 @@ export function getSourceFailureReason(status: SourceStatus): string | null {
   return status.detail ?? status.message;
 }
 
+function getParserLabel(parser: ParserSelectionInfo["parser"]): string {
+  switch (parser) {
+    case "ccm":
+      return "CCM";
+    case "simple":
+      return "Simple";
+    case "timestamped":
+      return "Timestamped";
+    case "plain":
+      return "Plain text";
+    case "panther":
+      return "Panther";
+    case "cbs":
+      return "CBS";
+    case "dism":
+      return "DISM";
+    case "reportingEvents":
+      return "ReportingEvents";
+  }
+}
+
+function getImplementationLabel(
+  implementation: ParserSelectionInfo["implementation"]
+): string {
+  switch (implementation) {
+    case "ccm":
+      return "CCM parser";
+    case "simple":
+      return "Simple parser";
+    case "genericTimestamped":
+      return "Generic timestamped parser";
+    case "reportingEvents":
+      return "ReportingEvents parser";
+    case "plainText":
+      return "Plain text parser";
+  }
+}
+
+function getProvenanceLabel(
+  provenance: ParserSelectionInfo["provenance"]
+): string {
+  switch (provenance) {
+    case "dedicated":
+      return "Dedicated";
+    case "heuristic":
+      return "Heuristic";
+    case "fallback":
+      return "Fallback";
+  }
+}
+
+function getQualityLabel(quality: ParserSelectionInfo["parseQuality"]): string {
+  switch (quality) {
+    case "structured":
+      return "Structured";
+    case "semiStructured":
+      return "Semi-structured";
+    case "textFallback":
+      return "Text fallback";
+  }
+}
+
+function getFramingLabel(framing: ParserSelectionInfo["recordFraming"]): string {
+  switch (framing) {
+    case "physicalLine":
+      return "Physical lines";
+    case "logicalRecord":
+      return "Logical records";
+  }
+}
+
+function getDateOrderLabel(
+  dateOrder: ParserSelectionInfo["dateOrder"]
+): string | null {
+  switch (dateOrder) {
+    case "monthFirst":
+      return "Month-first dates";
+    case "dayFirst":
+      return "Day-first dates";
+    default:
+      return null;
+  }
+}
+
+export function getParserSelectionDisplay(
+  selection: ParserSelectionInfo | null
+): ParserSelectionDisplay | null {
+  if (!selection) {
+    return null;
+  }
+
+  return {
+    parserLabel: getParserLabel(selection.parser),
+    implementationLabel: getImplementationLabel(selection.implementation),
+    provenanceLabel: getProvenanceLabel(selection.provenance),
+    qualityLabel: getQualityLabel(selection.parseQuality),
+    framingLabel: getFramingLabel(selection.recordFraming),
+    dateOrderLabel: getDateOrderLabel(selection.dateOrder),
+  };
+}
+
 function buildToolbarKnownSourceGroups(
   sources: KnownSourceMetadata[]
 ): KnownSourceToolbarGroup[] {
@@ -239,6 +350,7 @@ interface LogState {
   isPaused: boolean;
   isLoading: boolean;
   formatDetected: LogFormat | null;
+  parserSelection: ParserSelectionInfo | null;
   totalLines: number;
   /** Currently selected/tailed file path. */
   openFilePath: string | null;
@@ -272,6 +384,7 @@ interface LogState {
   togglePause: () => void;
   setLoading: (loading: boolean) => void;
   setFormatDetected: (format: LogFormat) => void;
+  setParserSelection: (selection: ParserSelectionInfo | null) => void;
   setTotalLines: (count: number) => void;
   setOpenFilePath: (path: string | null) => void;
   setActiveSource: (source: LogSource | null) => void;
@@ -353,6 +466,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   isPaused: false,
   isLoading: false,
   formatDetected: null,
+  parserSelection: null,
   totalLines: 0,
   openFilePath: null,
   activeSource: null,
@@ -398,6 +512,7 @@ export const useLogStore = create<LogState>((set, get) => ({
   togglePause: () => set((state) => ({ isPaused: !state.isPaused })),
   setLoading: (loading) => set({ isLoading: loading }),
   setFormatDetected: (format) => set({ formatDetected: format }),
+  setParserSelection: (selection) => set({ parserSelection: selection }),
   setTotalLines: (count) => set({ totalLines: count }),
   setOpenFilePath: (path) =>
     set({ openFilePath: path, selectedSourceFilePath: path }),
@@ -443,6 +558,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       selectedId: null,
       isPaused: false,
       formatDetected: null,
+      parserSelection: null,
       totalLines: 0,
       openFilePath: null,
       selectedSourceFilePath: null,
@@ -456,6 +572,7 @@ export const useLogStore = create<LogState>((set, get) => ({
       selectedId: null,
       isPaused: false,
       formatDetected: null,
+      parserSelection: null,
       totalLines: 0,
       openFilePath: null,
       activeSource: null,

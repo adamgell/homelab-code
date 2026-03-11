@@ -115,21 +115,20 @@ pub struct KnownSourceMetadata {
 }
 
 /// Open and parse a log file, auto-detecting its format.
-/// Stores the detected format and date order in AppState for tail reading.
+/// Stores the backend parser selection in AppState for tail reading.
 #[tauri::command]
 pub fn open_log_file(path: String, state: State<'_, AppState>) -> Result<ParseResult, String> {
-    let (result, date_order) = parser::parse_file(&path)?;
+    let (result, parser_selection) = parser::parse_file(&path)?;
 
-    // Store in AppState so the tail reader can use date_order later
+    // Store in AppState so tail parsing reuses the same backend parser selection.
     let mut open_files = state.open_files.lock().map_err(|e| e.to_string())?;
     open_files.insert(
         PathBuf::from(&path),
         OpenFile {
             path: PathBuf::from(&path),
             entries: vec![], // entries live in the frontend
-            format: result.format_detected,
+            parser_selection,
             byte_offset: result.byte_offset,
-            date_order,
         },
     );
 

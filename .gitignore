@@ -1,3 +1,6 @@
 cmtrace-open/.DS_Store
 .DS_Store
 .github/agents/
+cmtrace-open/src-tauri/target-tests
+cmtrace-open/src-tauri/tests/corpus/
+loginventory/

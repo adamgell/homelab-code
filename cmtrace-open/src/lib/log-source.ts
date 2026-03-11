@@ -253,6 +253,7 @@ function applyParseResultToStore(
   state.setSelectedSourceFilePath(selectedFilePath);
   state.setEntries(result.entries);
   state.setFormatDetected(result.formatDetected);
+  state.setParserSelection(result.parserSelection);
   state.setTotalLines(result.totalLines);
   state.setByteOffset(result.byteOffset);
   state.selectEntry(null);

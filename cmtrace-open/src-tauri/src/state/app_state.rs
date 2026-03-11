@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use crate::models::log_entry::{LogEntry, LogFormat};
-use crate::parser::timestamped::DateOrder;
+use crate::models::log_entry::LogEntry;
+use crate::parser::ResolvedParser;
 use crate::watcher::tail::TailSession;
 
 #[allow(dead_code)]
@@ -11,11 +11,9 @@ use crate::watcher::tail::TailSession;
 pub struct OpenFile {
     pub path: PathBuf,
     pub entries: Vec<LogEntry>,
-    pub format: LogFormat,
+    pub parser_selection: ResolvedParser,
     /// Current byte offset for tail tracking
     pub byte_offset: u64,
-    /// Date field ordering for timestamped format (US vs EU)
-    pub date_order: DateOrder,
 }
 
 /// Application-wide managed state.

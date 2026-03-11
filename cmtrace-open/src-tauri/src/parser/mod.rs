@@ -1,44 +1,94 @@
+pub mod cbs;
+pub mod panther;
 pub mod ccm;
 pub mod detect;
+pub mod dism;
 pub mod plain;
+pub mod reporting_events;
 pub mod severity;
 pub mod simple;
 pub mod timestamped;
 
-use crate::models::log_entry::{LogFormat, ParseResult};
-use crate::parser::timestamped::DateOrder;
+use crate::models::log_entry::{LogEntry, ParseResult};
 use std::path::Path;
 
+pub use detect::ResolvedParser;
+
+/// Result of parsing a single batch of records with a preselected parser.
+pub struct ParsedChunk {
+    pub entries: Vec<LogEntry>,
+    pub total_lines: u32,
+    pub parse_errors: u32,
+}
+
 /// Parse a log file, auto-detecting its format.
-/// Returns the parse result and the detected date order (relevant for Timestamped format).
-pub fn parse_file(path: &str) -> Result<(ParseResult, DateOrder), String> {
+/// Returns the parse result and the backend-owned parser selection used for it.
+pub fn parse_file(path: &str) -> Result<(ParseResult, ResolvedParser), String> {
     let path_obj = Path::new(path);
     let content = read_file_content(path)?;
     let file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-    let detected = detect::detect_format(&content);
-    let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len() as u32;
-
-    let (entries, parse_errors) = match detected.format {
-        LogFormat::Ccm => ccm::parse_lines(&lines, path),
-        LogFormat::Simple => simple::parse_lines(&lines, path),
-        LogFormat::Plain => plain::parse_lines(&lines, path),
-        LogFormat::Timestamped => timestamped::parse_lines(&lines, path, detected.date_order),
-    };
+    let selection = detect::detect_parser(path, &content);
+    let parsed_chunk = parse_content_with_selection(&content, path, &selection);
 
     let result = ParseResult {
-        entries,
-        format_detected: detected.format,
-        total_lines,
-        parse_errors,
+        entries: parsed_chunk.entries,
+        format_detected: selection.compatibility_format(),
+        parser_selection: selection.to_info(),
+        total_lines: parsed_chunk.total_lines,
+        parse_errors: parsed_chunk.parse_errors,
         file_path: path_obj.to_string_lossy().to_string(),
         file_size,
         // After initial parse, the byte offset is the file size
         byte_offset: file_size,
     };
 
-    Ok((result, detected.date_order))
+    Ok((result, selection))
+}
+
+/// Parse already-split lines using the backend-owned parser selection.
+pub fn parse_lines_with_selection(
+    lines: &[&str],
+    file_path: &str,
+    selection: &ResolvedParser,
+) -> (Vec<LogEntry>, u32) {
+    match selection.implementation {
+        crate::models::log_entry::ParserImplementation::Ccm => ccm::parse_lines(lines, file_path),
+        crate::models::log_entry::ParserImplementation::Simple => {
+            simple::parse_lines(lines, file_path)
+        }
+        crate::models::log_entry::ParserImplementation::ReportingEvents => {
+            reporting_events::parse_lines(lines, file_path)
+        }
+        crate::models::log_entry::ParserImplementation::PlainText => {
+            plain::parse_lines(lines, file_path)
+        }
+        crate::models::log_entry::ParserImplementation::GenericTimestamped => match selection.parser {
+            crate::models::log_entry::ParserKind::Cbs => cbs::parse_lines(lines, file_path),
+            crate::models::log_entry::ParserKind::Dism => dism::parse_lines(lines, file_path),
+            crate::models::log_entry::ParserKind::Panther => {
+                panther::parse_lines(lines, file_path)
+            }
+            _ => timestamped::parse_lines(lines, file_path, selection.date_order),
+        },
+    }
+}
+
+/// Parse text content using the backend-owned parser selection.
+pub fn parse_content_with_selection(
+    content: &str,
+    file_path: &str,
+    selection: &ResolvedParser,
+) -> ParsedChunk {
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len() as u32;
+    let (entries, parse_errors) = parse_lines_with_selection(&lines, file_path, selection);
+
+    ParsedChunk {
+        entries,
+        total_lines,
+        parse_errors,
+    }
 }
 
 /// Read file content, handling BOM and encoding fallback.
@@ -62,5 +112,119 @@ fn read_file_content(path: &str) -> Result<String, String> {
             }
             Ok(cow.into_owned())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::log_entry::{ParseQuality, ParserImplementation, ParserKind, ParserProvenance, RecordFraming};
+    use crate::parser::timestamped::DateOrder;
+
+    #[test]
+    fn test_parse_lines_with_selection_uses_timestamp_date_order() {
+        let selection = ResolvedParser::generic_timestamped(DateOrder::DayFirst);
+        let lines = ["15/01/2024 08:00:00 Processing request"];
+
+        let (entries, parse_errors) = parse_lines_with_selection(&lines, "sample.log", &selection);
+
+        assert_eq!(parse_errors, 0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].timestamp_display.as_deref(),
+            Some("2024-01-15 08:00:00.000")
+        );
+    }
+
+    #[test]
+    fn test_parse_lines_with_selection_can_use_panther_selection() {
+        let selection = ResolvedParser::new(
+            ParserKind::Panther,
+            ParserImplementation::GenericTimestamped,
+            ParserProvenance::Dedicated,
+            ParseQuality::SemiStructured,
+            RecordFraming::LogicalRecord,
+            DateOrder::MonthFirst,
+        );
+        let lines = ["2024-01-15 08:00:00, Info SP Setup complete"];
+
+        let (entries, parse_errors) = parse_lines_with_selection(&lines, "setupact.log", &selection);
+
+        assert_eq!(parse_errors, 0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(selection.compatibility_format(), crate::models::log_entry::LogFormat::Timestamped);
+        assert_eq!(entries[0].message, "Setup complete");
+        assert_eq!(entries[0].component.as_deref(), Some("SP"));
+    }
+
+    #[test]
+    fn test_parse_lines_with_selection_can_use_cbs_selection() {
+        let selection = ResolvedParser::new(
+            ParserKind::Cbs,
+            ParserImplementation::GenericTimestamped,
+            ParserProvenance::Dedicated,
+            ParseQuality::SemiStructured,
+            RecordFraming::LogicalRecord,
+            DateOrder::MonthFirst,
+        );
+        let lines = [
+            "2024-01-15 08:00:00, Info                  CBS    Exec: Started servicing",
+            "Continuation detail",
+        ];
+
+        let (entries, parse_errors) = parse_lines_with_selection(&lines, "CBS.log", &selection);
+
+        assert_eq!(parse_errors, 0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(selection.compatibility_format(), crate::models::log_entry::LogFormat::Timestamped);
+        assert_eq!(entries[0].component.as_deref(), Some("CBS"));
+        assert_eq!(entries[0].message, "Exec: Started servicing\nContinuation detail");
+    }
+
+    #[test]
+    fn test_parse_lines_with_selection_can_use_dism_selection() {
+        let selection = ResolvedParser::new(
+            ParserKind::Dism,
+            ParserImplementation::GenericTimestamped,
+            ParserProvenance::Dedicated,
+            ParseQuality::SemiStructured,
+            RecordFraming::LogicalRecord,
+            DateOrder::MonthFirst,
+        );
+        let lines = [
+            "2024-01-15 08:00:00, Warning               DISM   DISM Package Manager: Retry needed",
+            "Extra context",
+        ];
+
+        let (entries, parse_errors) = parse_lines_with_selection(&lines, "DISM.log", &selection);
+
+        assert_eq!(parse_errors, 0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(selection.compatibility_format(), crate::models::log_entry::LogFormat::Timestamped);
+        assert_eq!(entries[0].component.as_deref(), Some("DISM"));
+        assert_eq!(entries[0].message, "DISM Package Manager: Retry needed\nExtra context");
+    }
+
+    #[test]
+    fn test_parse_lines_with_selection_can_use_reporting_events_selection() {
+        let selection = ResolvedParser::new(
+            ParserKind::ReportingEvents,
+            ParserImplementation::ReportingEvents,
+            ParserProvenance::Dedicated,
+            ParseQuality::Structured,
+            RecordFraming::PhysicalLine,
+            DateOrder::MonthFirst,
+        );
+        let lines = [
+            "{11111111-1111-1111-1111-111111111111}\t2024-01-15 08:00:00:123\t1\tSoftware Update\t3\t{22222222-2222-2222-2222-222222222222}\t0x80240022\tWindows Update Agent\tFailure\tInstallation\tInstallation failed for KB5034123",
+        ];
+
+        let (entries, parse_errors) = parse_lines_with_selection(&lines, "ReportingEvents.log", &selection);
+
+        assert_eq!(parse_errors, 0);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(selection.compatibility_format(), crate::models::log_entry::LogFormat::Timestamped);
+        assert_eq!(entries[0].component.as_deref(), Some("Windows Update Agent"));
+        assert_eq!(entries[0].severity, crate::models::log_entry::Severity::Error);
     }
 }

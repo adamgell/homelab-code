@@ -20,7 +20,7 @@ pub struct TailPayload {
 #[tauri::command]
 pub fn start_tail(
     path: String,
-    format: LogFormat,
+    _format: LogFormat,
     byte_offset: u64,
     next_id: u64,
     next_line: u32,
@@ -37,23 +37,22 @@ pub fn start_tail(
         }
     }
 
-    // Look up date_order from AppState (stored during open_log_file)
-    let date_order = {
+    // Tailing reuses the backend-owned parser selection stored during open_log_file.
+    let parser_selection = {
         let open_files = state.open_files.lock().map_err(|e| e.to_string())?;
         open_files
             .get(&path_buf)
-            .map(|f| f.date_order)
-            .unwrap_or_default()
+            .map(|f| f.parser_selection.clone())
+            .ok_or_else(|| format!("file is not open: {}", path))?
     };
 
     let file_path_for_event = path.clone();
     let session = tail::start_tail_session(
         path_buf.clone(),
         byte_offset,
-        format,
+        parser_selection,
         next_id,
         next_line,
-        date_order,
         move |entries| {
             let payload = TailPayload {
                 entries,

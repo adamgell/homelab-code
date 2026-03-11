@@ -5,20 +5,18 @@ use std::sync::Arc;
 
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::models::log_entry::{LogEntry, LogFormat};
-use crate::parser::timestamped::DateOrder;
+use crate::models::log_entry::{LogEntry, RecordFraming};
+use crate::parser::{self, ResolvedParser};
 
 /// Manages incremental reading of a log file from a tracked byte offset.
 pub struct TailReader {
     path: PathBuf,
     byte_offset: u64,
-    format: LogFormat,
+    parser_selection: ResolvedParser,
     next_id: u64,
     next_line: u32,
-    /// Leftover partial line from previous read (file might be written mid-line)
-    partial_line: String,
-    /// Date field ordering for timestamped format
-    date_order: DateOrder,
+    /// Leftover partial record fragment from the previous read.
+    pending_fragment: String,
 }
 
 impl TailReader {
@@ -26,19 +24,17 @@ impl TailReader {
     pub fn new(
         path: PathBuf,
         byte_offset: u64,
-        format: LogFormat,
+        parser_selection: ResolvedParser,
         next_id: u64,
         next_line: u32,
-        date_order: DateOrder,
     ) -> Self {
         Self {
             path,
             byte_offset,
-            format,
+            parser_selection,
             next_id,
             next_line,
-            partial_line: String::new(),
-            date_order,
+            pending_fragment: String::new(),
         }
     }
 
@@ -57,7 +53,7 @@ impl TailReader {
         // File was truncated (e.g. log rotation) — reset to beginning
         if file_size < self.byte_offset {
             self.byte_offset = 0;
-            self.partial_line.clear();
+            self.pending_fragment.clear();
         }
 
         // No new data
@@ -83,39 +79,29 @@ impl TailReader {
             }
         };
 
-        // Prepend any partial line from last read
-        let full_text = if self.partial_line.is_empty() {
+        // Prepend any partial record fragment from the last read.
+        let full_text = if self.pending_fragment.is_empty() {
             new_text
         } else {
-            let combined = format!("{}{}", self.partial_line, new_text);
-            self.partial_line.clear();
+            let combined = format!("{}{}", self.pending_fragment, new_text);
+            self.pending_fragment.clear();
             combined
         };
 
-        // Split into lines — last "line" might be partial if file is still being written
-        let ends_with_newline = full_text.ends_with('\n') || full_text.ends_with("\r\n");
-        let mut lines: Vec<&str> = full_text.lines().collect();
-
-        if !ends_with_newline && !lines.is_empty() {
-            // Last line is incomplete — save it for next read
-            self.partial_line = lines.pop().unwrap_or("").to_string();
-        }
+        let lines = match self.parser_selection.record_framing {
+            RecordFraming::PhysicalLine | RecordFraming::LogicalRecord => {
+                collect_complete_lines(&full_text, &mut self.pending_fragment)
+            }
+        };
 
         if lines.is_empty() {
             self.byte_offset = file_size;
             return Ok(vec![]);
         }
 
-        // Parse the new complete lines
+        // Parse the new complete records through the same dispatch path as initial parsing.
         let path_str = self.path.to_string_lossy().to_string();
-        let (mut entries, _) = match self.format {
-            LogFormat::Ccm => crate::parser::ccm::parse_lines(&lines, &path_str),
-            LogFormat::Simple => crate::parser::simple::parse_lines(&lines, &path_str),
-            LogFormat::Plain => crate::parser::plain::parse_lines(&lines, &path_str),
-            LogFormat::Timestamped => {
-                crate::parser::timestamped::parse_lines(&lines, &path_str, self.date_order)
-            }
-        };
+        let (mut entries, _) = parser::parse_lines_with_selection(&lines, &path_str, &self.parser_selection);
 
         // Update IDs and line numbers to be sequential from where we left off
         for entry in &mut entries {
@@ -125,11 +111,22 @@ impl TailReader {
             self.next_line += 1;
         }
 
-        // Update byte offset (subtract the partial line bytes we kept)
-        self.byte_offset = file_size - self.partial_line.len() as u64;
+        // Update byte offset (subtract the pending fragment bytes we kept).
+        self.byte_offset = file_size - self.pending_fragment.len() as u64;
 
         Ok(entries)
     }
+}
+
+fn collect_complete_lines<'a>(text: &'a str, pending_fragment: &mut String) -> Vec<&'a str> {
+    let ends_with_newline = text.ends_with('\n') || text.ends_with("\r\n");
+    let mut lines: Vec<&str> = text.lines().collect();
+
+    if !ends_with_newline && !lines.is_empty() {
+        pending_fragment.push_str(lines.pop().unwrap_or(""));
+    }
+
+    lines
 }
 
 /// Represents an active tail-watching session
@@ -156,10 +153,9 @@ impl TailSession {
 pub fn start_tail_session<F>(
     path: PathBuf,
     byte_offset: u64,
-    format: LogFormat,
+    parser_selection: ResolvedParser,
     next_id: u64,
     next_line: u32,
-    date_order: DateOrder,
     on_new_entries: F,
 ) -> Result<TailSession, String>
 where
@@ -173,8 +169,7 @@ where
     let watch_path = path.clone();
 
     std::thread::spawn(move || {
-        let mut tail_reader =
-            TailReader::new(path, byte_offset, format, next_id, next_line, date_order);
+        let mut tail_reader = TailReader::new(path, byte_offset, parser_selection, next_id, next_line);
 
         // Create a channel for notify events
         let (tx, rx) = std::sync::mpsc::channel();
@@ -248,4 +243,185 @@ where
     });
 
     Ok(TailSession { stop_flag, paused })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::log_entry::LogFormat;
+    use crate::parser;
+    use crate::parser::detect::ResolvedParser;
+    use crate::parser::timestamped::DateOrder;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const PANTHER_CLEAN_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/panther/clean/setupact.log"
+    ));
+    const CBS_CLEAN_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/cbs/clean/CBS.log"
+    ));
+    const DISM_CLEAN_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/dism/clean/dism.log"
+    ));
+    const REPORTING_EVENTS_CLEAN_FIXTURE: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/corpus/reporting_events/clean/ReportingEvents.log"
+    ));
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("cmtrace-open-{name}-{stamp}.log"))
+    }
+
+    fn hinted_test_path(root: &Path, relative: &str) -> PathBuf {
+        root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR))
+    }
+
+    fn hinted_test_root(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+
+        std::env::temp_dir().join(format!("cmtrace-open-{name}-{stamp}"))
+    }
+
+    fn split_fixture(fixture: &str, initial_line_count: usize) -> (String, String) {
+        let lines: Vec<&str> = fixture.lines().collect();
+        let initial = format!("{}\n", lines[..initial_line_count].join("\n"));
+        let appended = format!("{}\n", lines[initial_line_count..].join("\n"));
+        (initial, appended)
+    }
+
+    fn assert_entries_match(actual: &LogEntry, expected: &LogEntry) {
+        assert_eq!(actual.id, expected.id);
+        assert_eq!(actual.line_number, expected.line_number);
+        assert_eq!(actual.message, expected.message);
+        assert_eq!(actual.component, expected.component);
+        assert_eq!(actual.timestamp, expected.timestamp);
+        assert_eq!(actual.timestamp_display, expected.timestamp_display);
+        assert_eq!(actual.severity, expected.severity);
+        assert_eq!(actual.format, expected.format);
+        assert_eq!(actual.file_path, expected.file_path);
+    }
+
+    #[test]
+    fn test_tail_reader_reuses_backend_parser_selection() {
+        let path = unique_test_path("tail-reader-selection");
+        let initial = "15/01/2024 08:00:00 Initial entry\n";
+        fs::write(&path, initial).expect("should write initial file");
+
+        let byte_offset = fs::metadata(&path)
+            .expect("metadata should exist")
+            .len();
+
+        let selection = ResolvedParser::generic_timestamped(DateOrder::DayFirst);
+        let mut reader = TailReader::new(path.clone(), byte_offset, selection, 1, 2);
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("should reopen temp file");
+        writeln!(file, "16/01/2024 09:30:00 Follow-up entry").expect("should append log line");
+        drop(file);
+
+        let entries = reader.read_new_entries().expect("tail read should succeed");
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].format, LogFormat::Timestamped);
+        assert_eq!(entries[0].id, 1);
+        assert_eq!(entries[0].line_number, 2);
+        assert_eq!(
+            entries[0].timestamp_display.as_deref(),
+            Some("2024-01-16 09:30:00.000")
+        );
+
+        fs::remove_file(path).expect("should clean up temp file");
+    }
+
+    #[test]
+    fn test_tail_reader_matches_open_parse_for_regression_corpus_cases() {
+        struct TailParityCase<'a> {
+            name: &'a str,
+            hinted_relative_path: &'a str,
+            fixture: &'a str,
+            initial_line_count: usize,
+        }
+
+        let cases = [
+            TailParityCase {
+                name: "panther-parity",
+                hinted_relative_path: "Windows/Panther/setupact.log",
+                fixture: PANTHER_CLEAN_FIXTURE,
+                initial_line_count: 3,
+            },
+            TailParityCase {
+                name: "cbs-parity",
+                hinted_relative_path: "Windows/Logs/CBS/CBS.log",
+                fixture: CBS_CLEAN_FIXTURE,
+                initial_line_count: 3,
+            },
+            TailParityCase {
+                name: "dism-parity",
+                hinted_relative_path: "Windows/Logs/DISM/dism.log",
+                fixture: DISM_CLEAN_FIXTURE,
+                initial_line_count: 2,
+            },
+            TailParityCase {
+                name: "reporting-events-parity",
+                hinted_relative_path: "Windows/SoftwareDistribution/ReportingEvents.log",
+                fixture: REPORTING_EVENTS_CLEAN_FIXTURE,
+                initial_line_count: 1,
+            },
+        ];
+
+        for case in cases {
+            let root = hinted_test_root(case.name);
+            let path = hinted_test_path(&root, case.hinted_relative_path);
+            let parent = path.parent().expect("fixture path should have a parent");
+            fs::create_dir_all(parent).expect("should create temporary parser hint directories");
+
+            let (initial, appended) = split_fixture(case.fixture, case.initial_line_count);
+            fs::write(&path, &initial).expect("should write initial fixture chunk");
+
+            let path_str = path.to_string_lossy().to_string();
+            let (initial_result, selection) =
+                parser::parse_file(&path_str).expect("initial fixture should parse");
+
+            let mut reader = TailReader::new(
+                path.clone(),
+                initial_result.byte_offset,
+                selection,
+                initial_result.entries.len() as u64,
+                initial_result.total_lines + 1,
+            );
+
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("should reopen temp file");
+            write!(file, "{}", appended).expect("should append trailing fixture chunk");
+            drop(file);
+
+            let tail_entries = reader.read_new_entries().expect("tail read should succeed");
+            let (full_result, _) = parser::parse_file(&path_str).expect("full fixture should parse");
+            let expected_entries = &full_result.entries[initial_result.entries.len()..];
+
+            assert_eq!(tail_entries.len(), expected_entries.len(), "case={}", case.name);
+
+            for (actual, expected) in tail_entries.iter().zip(expected_entries.iter()) {
+                assert_entries_match(actual, expected);
+            }
+
+            fs::remove_dir_all(root).expect("should clean up temp parity fixture");
+        }
+    }
 }

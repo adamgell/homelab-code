@@ -22,6 +22,77 @@ pub enum LogFormat {
     Timestamped,
 }
 
+/// High-level parser selection resolved by the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ParserKind {
+    Ccm,
+    Simple,
+    Timestamped,
+    Plain,
+    Panther,
+    Cbs,
+    Dism,
+    ReportingEvents,
+}
+
+/// Concrete parser implementation currently used by the backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ParserImplementation {
+    Ccm,
+    Simple,
+    GenericTimestamped,
+    ReportingEvents,
+    PlainText,
+}
+
+/// How the backend arrived at the parser selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ParserProvenance {
+    Dedicated,
+    Heuristic,
+    Fallback,
+}
+
+/// Approximate structure quality of the current parse path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ParseQuality {
+    Structured,
+    SemiStructured,
+    TextFallback,
+}
+
+/// How input is framed before it is handed to a parser implementation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecordFraming {
+    PhysicalLine,
+    LogicalRecord,
+}
+
+/// Slash-date interpretation used by timestamp-aware parsers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DateFieldOrder {
+    MonthFirst,
+    DayFirst,
+}
+
+/// Rich parser selection metadata returned to the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParserSelectionInfo {
+    pub parser: ParserKind,
+    pub implementation: ParserImplementation,
+    pub provenance: ParserProvenance,
+    pub parse_quality: ParseQuality,
+    pub record_framing: RecordFraming,
+    pub date_order: Option<DateFieldOrder>,
+}
+
 /// A single parsed log entry.
 /// Field names use camelCase for direct JSON serialization to TypeScript.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +132,7 @@ pub struct LogEntry {
 pub struct ParseResult {
     pub entries: Vec<LogEntry>,
     pub format_detected: LogFormat,
+    pub parser_selection: ParserSelectionInfo,
     pub total_lines: u32,
     pub parse_errors: u32,
     pub file_path: String,

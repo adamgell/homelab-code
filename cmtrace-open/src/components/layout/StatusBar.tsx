@@ -1,6 +1,7 @@
 import {
   getActiveSourceLabel,
   getBaseName,
+  getParserSelectionDisplay,
   getSourceFailureReason,
   getStreamStateSnapshot,
   useLogStore,
@@ -19,6 +20,7 @@ export function StatusBar() {
   const entries = useLogStore((s) => s.entries);
   const totalLines = useLogStore((s) => s.totalLines);
   const formatDetected = useLogStore((s) => s.formatDetected);
+  const parserSelection = useLogStore((s) => s.parserSelection);
   const openFilePath = useLogStore((s) => s.openFilePath);
   const selectedSourceFilePath = useLogStore((s) => s.selectedSourceFilePath);
   const activeSource = useLogStore((s) => s.activeSource);
@@ -66,6 +68,7 @@ export function StatusBar() {
     activeSource,
     openFilePath
   );
+  const parserDisplay = getParserSelectionDisplay(parserSelection);
   const uiChromeStatus = getUiChromeStatus(activeView, showDetails, showInfoPane);
   const filterStatus = getFilterStatusSnapshot(
     filterClauseCount,
@@ -86,13 +89,25 @@ export function StatusBar() {
       activeFileName ? `Source ${activeFileName}` : `Source ${activeSourceLabel}`,
     ];
 
+    if (parserDisplay) {
+      leftParts.push(`Parser ${parserDisplay.parserLabel}`);
+    }
+
     if (elapsedText) {
       leftParts.push(elapsedText);
     }
 
     const logStatusText =
       entries.length > 0
-        ? `${entries.length} entries | ${totalLines} lines | ${formatDetected ?? "Unknown"} format`
+        ? [
+            `${entries.length} entries`,
+            `${totalLines} lines`,
+            `${formatDetected ?? "Unknown"} format`,
+            parserDisplay?.provenanceLabel,
+            parserDisplay?.qualityLabel,
+          ]
+            .filter((part): part is string => Boolean(part))
+            .join(" | ")
         : failureReason
           ? `Reason: ${failureReason}`
           : sourceStatus.kind !== "idle"

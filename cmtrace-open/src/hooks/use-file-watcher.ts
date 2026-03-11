@@ -16,6 +16,7 @@ export function useFileWatcher() {
   const formatDetected = useLogStore((s) => s.formatDetected);
   const isPaused = useLogStore((s) => s.isPaused);
   const appendEntries = useLogStore((s) => s.appendEntries);
+  const setParserSelection = useLogStore((s) => s.setParserSelection);
 
   // Start/stop tailing when file changes
   useEffect(() => {
@@ -63,11 +64,15 @@ export function useFileWatcher() {
   // Listen for new tail entries from the Rust backend
   useEffect(() => {
     const unlisten = listen<TailPayload>("tail-new-entries", (event) => {
-      const { entries: newEntries, filePath } = event.payload;
+      const { entries: newEntries, filePath, parserSelection } = event.payload;
       const currentPath = useLogStore.getState().openFilePath;
 
       if (!currentPath || currentPath !== filePath || newEntries.length === 0) {
         return;
+      }
+
+      if (parserSelection) {
+        setParserSelection(parserSelection);
       }
 
       appendEntries(newEntries);
@@ -76,5 +81,5 @@ export function useFileWatcher() {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [appendEntries]);
+  }, [appendEntries, setParserSelection]);
 }
