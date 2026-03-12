@@ -127,6 +127,12 @@ Production builds are located at:
 - **Windows**: `src-tauri/target/release/bundle/nsis/CMTrace Open_x.x.x_x64-setup.exe`
 - **Linux**: `src-tauri/target/release/bundle/deb/` and `appimage/`
 
+## Evidence Workflow
+
+The tracked starter bundle lives under `templates/evidence-bundle/`. Copy that folder to a secure local working location outside the repo, rename `manifest.template.json` to `manifest.json`, rename `notes.template.md` to `notes.md`, and keep collected artifacts under the existing `evidence/` subfolders.
+
+The PowerShell collector lives at `scripts/collection/Invoke-CmtraceEvidenceCollection.ps1`. It produces the same high-level bundle shape with `manifest.json`, `notes.md`, and curated `evidence/` content, can run locally on a device, and can also be pushed through Intune or another remote runner without changing the downstream intake shape.
+
 ## Architecture
 
 ```text

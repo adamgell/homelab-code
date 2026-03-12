@@ -8,14 +8,16 @@ Internal planning document focused on unfinished work. Active priorities stay ne
 
 ## Active Focus
 
-The current focus is sample-driven hardening and broader evidence-bundle intake. Intune diagnostics is good enough for now as a first-pass workflow, so the next work should prioritize better sample intake, evidence inventory, parser hardening from real samples, registry state capture, and curated adjacent evidence sources.
+The current focus is sample-driven hardening and broader evidence-bundle intake. The tracked template under `templates/evidence-bundle/` and the PowerShell collector at `scripts/collection/Invoke-CmtraceEvidenceCollection.ps1` now define the working bundle shape, so the next work should prioritize better sample intake, evidence inventory, parser hardening from real samples, registry state capture, curated adjacent evidence sources, and remote collection that feeds the same structure.
 
 ## Recommended Next Implementation Slice
 
-1. Add a practical sample-intake flow that records what evidence was provided, what was recognized, and what is still unknown or unsupported.
-2. Build an evidence inventory so each local investigation starts with coverage and provenance instead of assumptions.
-3. Harden existing parsers and Intune evidence rules from real samples before expanding speculative source coverage.
-4. Treat registry snapshots and curated event-log exports as first-class adjacent evidence sources for live-device investigations.
+1. Make the tracked template and script-produced evidence bundle shape the canonical intake contract for investigations.
+2. Add a practical sample-intake flow that records what evidence was provided, what was recognized, and what is still unknown or unsupported.
+3. Build an evidence inventory so each local investigation starts with coverage and provenance instead of assumptions.
+4. Harden existing parsers and Intune evidence rules from real samples before expanding speculative source coverage.
+5. Treat registry snapshots and curated event-log exports as first-class adjacent evidence sources for live-device investigations.
+6. Ensure remote collection paths feed the same evidence-bundle shape instead of introducing a separate intake format.
 
 ---
 
@@ -25,6 +27,8 @@ The current focus is sample-driven hardening and broader evidence-bundle intake.
 
 **Expected outcome**: a dropped local evidence bundle produces a stable intake summary showing recognized artifacts, unsupported artifacts, parse status, and obvious evidence gaps.
 
+- Treat the tracked template under `templates/evidence-bundle/` as the canonical local intake layout.
+- Accept the same layout whether it came from a manual local copy workflow or from `scripts/collection/Invoke-CmtraceEvidenceCollection.ps1`.
 - Accept a local investigation folder as a mixed evidence bundle, not just a log directory.
 - Classify inputs into logs, registry exports, event-log exports, and unknown artifacts.
 - Show recognized source families, parse success/failure, and any high-value missing evidence.
@@ -34,6 +38,7 @@ The current focus is sample-driven hardening and broader evidence-bundle intake.
 
 **Expected outcome**: each diagnostic summary can answer which artifacts were included, which were ignored, and which file or snapshot produced each notable event.
 
+- Use `manifest.json` and `notes.md` as first-class inventory inputs when they are present.
 - Add an evidence inventory view with source type, origin path, time coverage, and parse status.
 - Surface provenance throughout summaries and timelines instead of collapsing everything into a single implied source.
 - Make it obvious when conclusions are based on partial evidence or a narrow subset of the supplied bundle.
@@ -52,6 +57,7 @@ The current focus is sample-driven hardening and broader evidence-bundle intake.
 
 - Treat registry data as state snapshots, not as another line-log parser.
 - Start with exported `.reg` and other practical snapshot inputs that show enrollment, policy, and app-management state.
+- Align collector output and manual bundle intake so registry snapshots land under the same `evidence/registry/` shape.
 - Normalize keys, values, and hives so policy, enrollment, and health views can reference them directly.
 - Support side-by-side comparison of intended state, effective state, and observed failures where that evidence exists.
 
@@ -61,9 +67,18 @@ The current focus is sample-driven hardening and broader evidence-bundle intake.
 
 - Start with curated channels relevant to MDM, Autopilot, enrollment, BitLocker, LAPS, and Defender.
 - Prefer practical intake paths such as saved exports or offline investigation artifacts before expanding to a broad live-channel browser.
+- Align collector output and manual bundle intake so curated event exports land under the same `evidence/event-logs/` shape.
 - Correlate event IDs, levels, and timestamps back into the shared evidence inventory and timelines.
 
-### 0.6 Intune Rule Maintenance from New Samples — P2 / S
+### 0.6 Remote Collection Feeding Shared Bundle Shape — P1 / M
+
+**Expected outcome**: evidence collected remotely still lands in the same reviewable bundle shape as local manual copies and local script runs.
+
+- Keep remote execution focused on producing `manifest.json`, `notes.md`, and the existing `evidence/` folder layout.
+- Support Intune or other management delivery only as transport and execution layers, not as a different evidence schema.
+- Reuse the same intake, inventory, and provenance logic regardless of whether the bundle was assembled locally or remotely.
+
+### 0.7 Intune Rule Maintenance from New Samples — P2 / S
 
 **Expected outcome**: current Intune diagnostics stays useful without becoming the primary feature track.
 
@@ -487,7 +502,7 @@ Use mapped I/O for very large files only if simpler parsing improvements stop be
 
 ### 7.1 Collect Diagnostics Bundle Support — P1 / L
 
-Open Intune remote diagnostics bundles and expose logs, registry exports, and command output from one entry point.
+Open remotely collected diagnostics bundles and expose logs, registry exports, event-log exports, and command output from one entry point, using the same evidence-bundle shape as the tracked template and local PowerShell collector.
 
 ### 7.2 MDM Diagnostic Report Viewer — P2 / M
 
@@ -509,54 +524,51 @@ When opening an IME directory, summarize rotation state, time coverage, large ga
 
 ## 8. Prioritized Implementation Phases
 
-These phases reflect unfinished work only and keep the near-term sequence aligned with the current Intune-first focus.
+These phases reflect unfinished work only and keep the near-term sequence aligned with the current evidence-bundle-first focus.
 
-### Phase 1 — Intune Diagnostics Depth
+### Phase 1 — Evidence Intake Baseline
 
 Target: immediate next slice. Estimated effort: 3–5 days.
 
-1. IME sidecar heuristic depth for `AppWorkload.log`, `AppActionProcessor.log`, `AgentExecutor.log`, and `HealthScripts.log` (2.1)
-2. Diagnostics coverage and guided insight refinement (2.6)
-3. Time Delta calculation (3.1)
-4. Save As / Export (3.2)
-5. Severity quick-filter buttons (4.1)
+1. Sample intake baseline using the tracked template and script-produced bundle shape (0.1)
+2. Evidence inventory and provenance foundation (0.2)
+3. Remote collection feeding the shared bundle shape (0.6)
+4. Collect diagnostics bundle support (7.1)
 
-### Phase 2 — Supporting Diagnostic Flow
+### Phase 2 — Evidence Quality and Adjacent Evidence
 
 Target: following release. Estimated effort: 1–2 weeks.
 
-1. Event log channel integration foundation (2.2)
-2. Expand embedded error database (5.1)
-3. Inline error detection (5.2)
-4. Regex support in Find/Filter (3.6)
+1. Parser hardening from real samples (0.3)
+2. Registry snapshot support (0.4)
+3. Curated event-log intake (0.5)
+4. IME rule maintenance from new samples (0.7)
+5. Event log channel integration foundation (2.2)
+
+### Phase 3 — Workflow and Investigation UX
+
+Target: after intake and evidence quality land. Estimated effort: 2–3 weeks.
+
+1. Diagnostics coverage and guided insight refinement (2.6)
+2. Time Delta calculation (3.1)
+3. Save As / Export (3.2)
+4. Severity quick-filter buttons (4.1)
 5. Entry count and position indicator (4.3)
 6. Tail mode indicator (4.7)
 7. Incremental parsing (6.1)
 
-### Phase 3 — Windows Diagnostics Breadth
-
-Target: after the next Intune refinement pass. Estimated effort: 2–3 weeks.
-
-1. CBS/Panther parser (1.1)
-2. WindowsUpdate.log parser (1.4)
-3. Collect Diagnostics bundle support (7.1)
-4. Autopilot diagnostics panel (2.3)
-5. Preferences / Settings dialog (3.3)
-6. Dark theme (4.2)
-
-### Phase 4 — Parity and Workflow Expansion
+### Phase 4 — Parser Expansion and Correlated Views
 
 Target: later follow-on release. Estimated effort: 2–3 weeks.
 
-1. SetupAPI section parser (1.2)
-2. MSI multi-format parser (1.3)
-3. ReportingEvents.log parser (1.5)
-4. W3C extended log parser (1.6)
-5. Multi-file support (3.4)
-6. Column customization (3.9)
-7. Log entry detail enhancement (4.6)
+1. CBS/Panther parser (1.1)
+2. WindowsUpdate.log parser (1.4)
+3. SetupAPI section parser (1.2)
+4. MSI multi-format parser (1.3)
+5. ReportingEvents.log parser (1.5)
+6. W3C extended log parser (1.6)
+7. Autopilot diagnostics panel (2.3)
 8. MDM diagnostic report viewer (7.2)
-9. Command-line interface (7.4)
 
 ### Phase 5 — Longer-Term Additions
 
@@ -584,6 +596,8 @@ Target: no fixed timeline.
 
 Shipped work that should no longer appear as active roadmap items:
 
+- The tracked evidence-bundle template lives under `templates/evidence-bundle/` and is intended to be copied to a local working folder outside the repo.
+- The PowerShell collector at `scripts/collection/Invoke-CmtraceEvidenceCollection.ps1` produces the same high-level `manifest.json` + `notes.md` + `evidence/` bundle shape for local or remote execution.
 - Log sources are first-class inputs: file, folder, and known platform presets.
 - Folder open and file browsing are available in the main log workflow, including toolbar access.
 - Known source presets include Windows IME logs and route through the shared source-loading flow.
