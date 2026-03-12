@@ -6,6 +6,8 @@ param(
     [string]$TaskName = 'CmtraceOpen-EvidenceCollection-Once',
     [int]$DelayMinutes = 2,
     [int]$ThrottleHours = 24,
+    [version]$RequiredPowerShellVersion = [version]'7.5.4',
+    [string]$PowerShellMsiUrl = 'https://github.com/PowerShell/PowerShell/releases/download/v7.5.4/PowerShell-7.5.4-win-x64.msi',
     [string]$CollectorProfileUrl = '', #fill out
     [string]$CollectorScriptUrl = '', #fill out
     [string]$SasUrl = '', #fill out
@@ -59,6 +61,42 @@ function Write-JsonFile {
     [System.IO.File]::WriteAllText($Path, $json, $utf8Encoding)
 }
 
+function Test-ConvertFromJsonDepthSupport {
+    if ($null -ne $script:ConvertFromJsonDepthSupported) {
+        return $script:ConvertFromJsonDepthSupported
+    }
+
+    $command = Get-Command -Name ConvertFrom-Json -ErrorAction Stop
+    $script:ConvertFromJsonDepthSupported = $command.Parameters.ContainsKey('Depth')
+    return $script:ConvertFromJsonDepthSupported
+}
+
+function ConvertFrom-JsonCompat {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        [AllowEmptyString()]
+        [string]$InputObject,
+        [int]$Depth = 1024
+    )
+
+    process {
+        $convertFromJsonParameters = @{
+            InputObject = $InputObject
+        }
+
+        if ($PSBoundParameters.ContainsKey('ErrorAction')) {
+            $convertFromJsonParameters.ErrorAction = $PSBoundParameters.ErrorAction
+        }
+
+        if (Test-ConvertFromJsonDepthSupport) {
+            $convertFromJsonParameters.Depth = $Depth
+        }
+
+        return (ConvertFrom-Json @convertFromJsonParameters)
+    }
+}
+
 function Read-JsonFile {
     param(
         [Parameter(Mandatory = $true)]
@@ -69,7 +107,7 @@ function Read-JsonFile {
         return $null
     }
 
-    return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 10)
+    return (Get-Content -LiteralPath $Path -Raw | ConvertFrom-JsonCompat -Depth 10)
 }
 
 function Quote-TaskArgument {
@@ -123,22 +161,258 @@ function Download-File {
     Invoke-WebRequest -Uri $Url -OutFile $DestinationPath -UseBasicParsing
 }
 
-function Get-PowerShellExecutable {
-    $pwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue
-    if ($pwshCommand -and -not [string]::IsNullOrWhiteSpace($pwshCommand.Source)) {
-        return $pwshCommand.Source
+function Get-CommandExecutablePath {
+    param(
+        [AllowEmptyString()]
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return $null
     }
 
-    foreach ($candidatePath in @(
+    $command = Get-Command -Name $Name -CommandType Application -ErrorAction SilentlyContinue
+    if ($null -eq $command) {
+        return $null
+    }
+
+    foreach ($propertyName in @('Path', 'Source', 'Definition')) {
+        $property = $command.PSObject.Properties[$propertyName]
+        if ($null -eq $property) {
+            continue
+        }
+
+        $propertyValue = [string]$property.Value
+        if ([string]::IsNullOrWhiteSpace($propertyValue)) {
+            continue
+        }
+
+        return $propertyValue
+    }
+
+    return $null
+}
+
+function Get-FileContentIdentifier {
+    param(
+        [AllowEmptyString()]
+        [string]$Path
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $null
+    }
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    try {
+        return ('sha256:{0}' -f (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant())
+    }
+    catch {
+        return $null
+    }
+}
+
+function Get-PowerShellExecutableCandidates {
+    $candidatePaths = New-Object System.Collections.Generic.List[string]
+    $resolvedPwshPath = Get-CommandExecutablePath -Name 'pwsh.exe'
+
+    foreach ($preferredPath in @(
             (Join-Path ${env:ProgramFiles} 'PowerShell\7\pwsh.exe'),
+            $resolvedPwshPath,
             (Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe')
         )) {
-        if ($candidatePath -and (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
-            return $candidatePath
+        if ([string]::IsNullOrWhiteSpace($preferredPath)) {
+            continue
+        }
+
+        if (-not $candidatePaths.Contains($preferredPath)) {
+            $candidatePaths.Add($preferredPath)
         }
     }
 
-    throw 'pwsh.exe was not found. Install PowerShell 7 or update the bootstrap to point at a valid pwsh path.'
+    return $candidatePaths
+}
+
+function Get-PowerShellExecutableVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $versionOutput = & $Path -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' 2>$null
+        if ($LASTEXITCODE -ne 0) {
+            return $null
+        }
+
+        $versionText = [string]($versionOutput | Select-Object -First 1)
+        if ([string]::IsNullOrWhiteSpace($versionText)) {
+            return $null
+        }
+
+        $parsedVersion = $null
+        if ([version]::TryParse($versionText.Trim(), [ref]$parsedVersion)) {
+            return $parsedVersion
+        }
+    }
+    catch {
+        return $null
+    }
+
+    return $null
+}
+
+function Resolve-PowerShellExecutable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [version]$MinimumVersion
+    )
+
+    $fallbackCandidate = $null
+
+    foreach ($candidatePath in (Get-PowerShellExecutableCandidates)) {
+        if (-not (Test-Path -LiteralPath $candidatePath -PathType Leaf)) {
+            continue
+        }
+
+        $candidateVersion = Get-PowerShellExecutableVersion -Path $candidatePath
+        if ($null -eq $candidateVersion) {
+            continue
+        }
+
+        $source = if ($candidatePath -eq (Join-Path ${env:ProgramFiles} 'PowerShell\7\pwsh.exe')) {
+            'programfiles-x64'
+        }
+        elseif ($candidatePath -eq (Join-Path ${env:ProgramFiles(x86)} 'PowerShell\7\pwsh.exe')) {
+            'programfiles-x86'
+        }
+        else {
+            'command-path'
+        }
+
+        $candidate = [ordered]@{
+            Found      = $true
+            Acceptable = ($candidateVersion -ge $MinimumVersion)
+            Path       = $candidatePath
+            Version    = $candidateVersion
+            Source     = $source
+        }
+
+        if ($candidate.Acceptable) {
+            return [pscustomobject]$candidate
+        }
+
+        if ($null -eq $fallbackCandidate) {
+            $fallbackCandidate = [pscustomobject]$candidate
+        }
+    }
+
+    if ($null -ne $fallbackCandidate) {
+        return $fallbackCandidate
+    }
+
+    return [pscustomobject]@{
+        Found      = $false
+        Acceptable = $false
+        Path       = $null
+        Version    = $null
+        Source     = 'not-found'
+    }
+}
+
+function Install-PowerShellMsi {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Url,
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationPath
+    )
+
+    if (-not (Test-HttpsUrl -Value $Url)) {
+        throw "PowerShellMsiUrl must be an HTTPS URL: $Url"
+    }
+
+    Write-Step 'Downloading PowerShell MSI payload'
+    Download-File -Url $Url -DestinationPath $DestinationPath
+
+    Write-Step 'Installing PowerShell MSI payload'
+    $installerProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList ('/i "{0}" /qn /norestart ALLUSERS=1' -f $DestinationPath) -Wait -PassThru -WindowStyle Hidden
+    $restartRequired = $installerProcess.ExitCode -in @(3010, 1641)
+    $installSucceeded = $installerProcess.ExitCode -in @(0, 3010, 1641)
+
+    return [pscustomobject]@{
+        StagedMsiPath     = $DestinationPath
+        InstallerExitCode = $installerProcess.ExitCode
+        RestartRequired   = $restartRequired
+        InstallSucceeded  = $installSucceeded
+    }
+}
+
+function Ensure-PowerShellExecutable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [version]$MinimumVersion,
+        [Parameter(Mandatory = $true)]
+        [string]$MsiUrl,
+        [Parameter(Mandatory = $true)]
+        [string]$MsiPath
+    )
+
+    $initialResolution = Resolve-PowerShellExecutable -MinimumVersion $MinimumVersion
+    $details = [ordered]@{
+        requiredVersion   = $MinimumVersion.ToString()
+        msiUrl            = $MsiUrl
+        action            = if ($initialResolution.Acceptable) { 'existing' } else { 'install-required' }
+        installAttempted  = $false
+        initialPath       = $initialResolution.Path
+        initialVersion    = if ($null -ne $initialResolution.Version) { $initialResolution.Version.ToString() } else { $null }
+        initialSource     = $initialResolution.Source
+        stagedMsiPath     = $null
+        installerExitCode = $null
+        restartRequired   = $false
+        finalPath         = $initialResolution.Path
+        finalVersion      = if ($null -ne $initialResolution.Version) { $initialResolution.Version.ToString() } else { $null }
+        finalSource       = $initialResolution.Source
+    }
+
+    if ($initialResolution.Acceptable) {
+        return [pscustomobject]@{
+            ExecutablePath = $initialResolution.Path
+            Version        = $initialResolution.Version
+            Details        = [pscustomobject]$details
+        }
+    }
+
+    $details.installAttempted = $true
+    $details.stagedMsiPath = $MsiPath
+
+    $installResult = Install-PowerShellMsi -Url $MsiUrl -DestinationPath $MsiPath
+    $details.action = 'installed'
+    $details.installerExitCode = $installResult.InstallerExitCode
+    $details.restartRequired = $installResult.RestartRequired
+    $details.stagedMsiPath = $installResult.StagedMsiPath
+
+    $finalResolution = Resolve-PowerShellExecutable -MinimumVersion $MinimumVersion
+    $details.finalPath = $finalResolution.Path
+    $details.finalVersion = if ($null -ne $finalResolution.Version) { $finalResolution.Version.ToString() } else { $null }
+    $details.finalSource = $finalResolution.Source
+
+    if (-not $finalResolution.Acceptable) {
+        throw ('PowerShell {0} or later is required, but pwsh.exe could not be resolved after MSI install. Installer exit code: {1}. MSI path: {2}.' -f $MinimumVersion, $installResult.InstallerExitCode, $installResult.StagedMsiPath)
+    }
+
+    if (-not $installResult.InstallSucceeded) {
+        throw ('PowerShell MSI install reported exit code {0} even though pwsh.exe resolved afterward. Treating this as a failure to avoid masking an incomplete installation.' -f $installResult.InstallerExitCode)
+    }
+
+    return [pscustomobject]@{
+        ExecutablePath = $finalResolution.Path
+        Version        = $finalResolution.Version
+        Details        = [pscustomobject]$details
+    }
 }
 
 function Test-PowerShellFile {
@@ -160,7 +434,7 @@ function Test-JsonFile {
     )
 
     try {
-        Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json -Depth 20 | Out-Null
+        Get-Content -LiteralPath $Path -Raw | ConvertFrom-JsonCompat -Depth 20 | Out-Null
         return $true
     }
     catch {
@@ -259,7 +533,7 @@ function Assert-ValidJsonFile {
     }
 
     try {
-        $rawContent | ConvertFrom-Json -Depth 20 -ErrorAction Stop | Out-Null
+        $rawContent | ConvertFrom-JsonCompat -Depth 20 -ErrorAction Stop | Out-Null
     }
     catch {
         $preview = Get-FilePreview -Path $Path
@@ -401,9 +675,28 @@ function New-CollectorArgumentString {
     return ($arguments -join ' ')
 }
 
+function New-StagedPayloadPath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Root,
+        [Parameter(Mandatory = $true)]
+        [string]$BaseName,
+        [Parameter(Mandatory = $true)]
+        [string]$RunId
+    )
+
+    $extension = [System.IO.Path]::GetExtension($BaseName)
+    $stem = [System.IO.Path]::GetFileNameWithoutExtension($BaseName)
+    return (Join-Path $Root ('{0}-{1}{2}' -f $stem, $RunId, $extension))
+}
+
+$bootstrapRunId = [guid]::NewGuid().ToString('N')
+$bootstrapScriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) { $MyInvocation.MyCommand.Path } else { $PSCommandPath }
+$bootstrapScriptContentId = Get-FileContentIdentifier -Path $bootstrapScriptPath
 $statePath = Join-Path $StateRoot 'collection-bootstrap.json'
-$stagedCollectorPath = Join-Path $StagingRoot 'Invoke-CmtraceEvidenceCollection.ps1'
-$stagedProfilePath = Join-Path $StagingRoot 'intune-evidence-profile.json'
+$stagedCollectorPath = New-StagedPayloadPath -Root $StagingRoot -BaseName 'Invoke-CmtraceEvidenceCollection.ps1' -RunId $bootstrapRunId
+$stagedProfilePath = New-StagedPayloadPath -Root $StagingRoot -BaseName 'intune-evidence-profile.json' -RunId $bootstrapRunId
+$stagedPowerShellMsiPath = Join-Path $StagingRoot ('PowerShell-{0}-win-x64.msi' -f $RequiredPowerShellVersion)
 
 Write-Step 'Preparing bootstrap directories'
 Ensure-Directory -Path $StagingRoot
@@ -434,10 +727,12 @@ if (Get-ShouldThrottle -StatePath $statePath -WindowHours $ThrottleHours -Ignore
     $existingTask = Get-Task -Name $TaskName
     $status = if ($existingTask) { 'skipped-throttled-task-present' } else { 'skipped-throttled' }
     [pscustomobject]@{
-        Status    = $status
-        TaskName  = $TaskName
-        StatePath = $statePath
-        Message   = 'Bootstrap skipped because the throttle window is still active.'
+        Status                   = $status
+        TaskName                 = $TaskName
+        StatePath                = $statePath
+        BootstrapScriptPath      = $bootstrapScriptPath
+        BootstrapScriptContentId = $bootstrapScriptContentId
+        Message                  = 'Bootstrap skipped because the throttle window is still active.'
     }
     exit 0
 }
@@ -449,6 +744,9 @@ Download-File -Url $CollectorProfileUrl -DestinationPath $stagedProfilePath
 Write-Step 'Validating staged collector payloads'
 Validate-StagedPayloads -CollectorPath $stagedCollectorPath -ProfilePath $stagedProfilePath -ProfileSource $CollectorProfileUrl
 
+Write-Step 'Resolving PowerShell runtime'
+$powerShellResolution = Ensure-PowerShellExecutable -MinimumVersion $RequiredPowerShellVersion -MsiUrl $PowerShellMsiUrl -MsiPath $stagedPowerShellMsiPath
+
 $resolvedSasUrl = $SasUrl
 
 $caseReferenceValue = if ([string]::IsNullOrWhiteSpace($CaseReference)) {
@@ -459,7 +757,7 @@ else {
 }
 
 $taskArguments = New-CollectorArgumentString -CollectorPath $stagedCollectorPath -ProfilePath $stagedProfilePath -CollectorOutputRoot $OutputRoot -CollectorBundleLabel $BundleLabel -CollectorCaseReference $caseReferenceValue -CollectorBlobName $BlobName -CollectorOperatorName $OperatorName -CollectorOperatorTeam $OperatorTeam -CollectorOperatorContact $OperatorContact -ResolvedSasUrl $resolvedSasUrl -RunLocalOnly:$LocalOnly
-$powerShellExecutable = Get-PowerShellExecutable
+$powerShellExecutable = $powerShellResolution.ExecutablePath
 
 Write-Step 'Registering one-time SYSTEM scheduled task'
 if ($Force) {
@@ -477,30 +775,40 @@ $taskSettings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -
 Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $taskTrigger -User 'SYSTEM' -RunLevel Highest -Settings $taskSettings -Force | Out-Null
 
 $state = [ordered]@{
-    registeredUtc        = Get-UtcTimestamp
-    triggerUtc           = $triggerTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    taskName             = $TaskName
-    stagingRoot          = $StagingRoot
-    outputRoot           = $OutputRoot
-    collectorScriptUrl   = $CollectorScriptUrl
-    collectorProfileUrl  = $CollectorProfileUrl
-    powerShellExecutable = $powerShellExecutable
-    sasUrlConfigured     = (-not [string]::IsNullOrWhiteSpace($SasUrl))
-    localOnly            = [bool]$LocalOnly
-    caseReference        = $caseReferenceValue
+    registeredUtc            = Get-UtcTimestamp
+    triggerUtc               = $triggerTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    bootstrapRunId           = $bootstrapRunId
+    bootstrapScriptPath      = $bootstrapScriptPath
+    bootstrapScriptContentId = $bootstrapScriptContentId
+    taskName                 = $TaskName
+    stagingRoot              = $StagingRoot
+    stagedCollectorPath      = $stagedCollectorPath
+    stagedProfilePath        = $stagedProfilePath
+    outputRoot               = $OutputRoot
+    collectorScriptUrl       = $CollectorScriptUrl
+    collectorProfileUrl      = $CollectorProfileUrl
+    powerShell               = $powerShellResolution.Details
+    powerShellExecutable     = $powerShellExecutable
+    sasUrlConfigured         = (-not [string]::IsNullOrWhiteSpace($SasUrl))
+    localOnly                = [bool]$LocalOnly
+    caseReference            = $caseReferenceValue
 }
 
 Write-JsonFile -InputObject $state -Path $statePath
 
 Write-Step 'Bootstrap complete'
 [pscustomobject]@{
-    Status               = 'scheduled'
-    TaskName             = $TaskName
-    TriggerTimeUtc       = $triggerTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    StatePath            = $statePath
-    StagedCollectorPath  = $stagedCollectorPath
-    StagedProfilePath    = $stagedProfilePath
-    PowerShellExecutable = $powerShellExecutable
-    SasUrlConfigured     = (-not [string]::IsNullOrWhiteSpace($SasUrl))
-    OutputRoot           = $OutputRoot
+    Status                   = 'scheduled'
+    BootstrapRunId           = $bootstrapRunId
+    BootstrapScriptPath      = $bootstrapScriptPath
+    BootstrapScriptContentId = $bootstrapScriptContentId
+    TaskName                 = $TaskName
+    TriggerTimeUtc           = $triggerTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    StatePath                = $statePath
+    StagedCollectorPath      = $stagedCollectorPath
+    StagedProfilePath        = $stagedProfilePath
+    PowerShell               = $powerShellResolution.Details
+    PowerShellExecutable     = $powerShellExecutable
+    SasUrlConfigured         = (-not [string]::IsNullOrWhiteSpace($SasUrl))
+    OutputRoot               = $OutputRoot
 }

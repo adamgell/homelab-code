@@ -21,6 +21,25 @@ if ([string]::IsNullOrWhiteSpace($CollectorProfilePath)) {
 
 $script:CollectorVersion = '1.1.0'
 $script:ArtifactCounters = @{}
+$script:CollectorRunLogPath = $null
+$script:CollectorTranscriptStarted = $false
+
+function Protect-SecretText {
+    param(
+        [AllowNull()]
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        return $null
+    }
+
+    return [System.Text.RegularExpressions.Regex]::Replace(
+        $Text,
+        '(https?://[^\s''""<>]+)\?[^\s''""<>]+',
+        '$1?<redacted>'
+    )
+}
 
 function Write-Step {
     param(
@@ -28,7 +47,8 @@ function Write-Step {
         [string]$Message
     )
 
-    Write-Host "==> $Message" -ForegroundColor Cyan
+    $sanitizedMessage = Protect-SecretText -Text $Message
+    Write-Host "==> $sanitizedMessage" -ForegroundColor Cyan
 }
 
 function Get-UtcTimestamp {
@@ -43,6 +63,18 @@ function Ensure-Directory {
 
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -Path $Path -ItemType Directory -Force | Out-Null
+    }
+}
+
+function Ensure-ParentDirectory {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $parentPath = Split-Path -Parent $Path
+    if (-not [string]::IsNullOrWhiteSpace($parentPath)) {
+        Ensure-Directory -Path $parentPath
     }
 }
 
@@ -102,6 +134,7 @@ function Write-JsonFile {
         [string]$Path
     )
 
+    Ensure-ParentDirectory -Path $Path
     $utf8Encoding = New-Object System.Text.UTF8Encoding($false)
     $json = $InputObject | ConvertTo-Json -Depth 12
     [System.IO.File]::WriteAllText($Path, $json, $utf8Encoding)
@@ -115,8 +148,43 @@ function Write-TextFile {
         [string]$Path
     )
 
+    Ensure-ParentDirectory -Path $Path
     $utf8Encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Content, $utf8Encoding)
+}
+
+function Start-CollectorTranscript {
+    $logRoot = Join-Path $env:ProgramData 'CmtraceOpen\Logs\Collection'
+    $logFileName = 'collector-{0}-{1}-{2}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), (ConvertTo-SafeFileName -Value $env:COMPUTERNAME), $PID
+    $script:CollectorRunLogPath = Join-Path $logRoot $logFileName
+
+    Ensure-Directory -Path $logRoot
+
+    try {
+        $null = Start-Transcript -LiteralPath $script:CollectorRunLogPath -Force -UseMinimalHeader -IncludeInvocationHeader -ErrorAction Stop
+        $script:CollectorTranscriptStarted = $true
+        Write-Step ('Collector run log: {0}' -f $script:CollectorRunLogPath)
+    }
+    catch {
+        $script:CollectorTranscriptStarted = $false
+        Write-Warning ('Collector transcript could not be started at {0}: {1}' -f $script:CollectorRunLogPath, (Protect-SecretText -Text $_.Exception.Message))
+    }
+}
+
+function Stop-CollectorTranscript {
+    if (-not $script:CollectorTranscriptStarted) {
+        return
+    }
+
+    try {
+        $null = Stop-Transcript -ErrorAction Stop
+    }
+    catch {
+        Write-Warning ('Collector transcript could not be stopped cleanly: {0}' -f (Protect-SecretText -Text $_.Exception.Message))
+    }
+    finally {
+        $script:CollectorTranscriptStarted = $false
+    }
 }
 
 function Get-FileSha256 {
@@ -315,7 +383,7 @@ function Read-CollectorProfile {
         throw ('Collector profile contains invalid JSON: {0}. Error: {1}' -f $Path, $_.Exception.Message)
     }
 
-    Assert-CollectorProfileShape -Profile $collectorProfile -Path $Path
+    Assert-CollectorProfileShape -CollectorProfile $collectorProfile -Path $Path
     return $collectorProfile
 }
 
@@ -475,6 +543,7 @@ function Add-GeneratedCommandArtifacts {
         }
 
         try {
+            Ensure-ParentDirectory -Path $destinationPath
             Copy-Item -LiteralPath $resolvedSourcePath -Destination $destinationPath -Force
             $sourceFile = Get-Item -LiteralPath $resolvedSourcePath -ErrorAction Stop
             $artifact = New-ArtifactRecord -Category 'export' -Family $family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'collected' -ParseHints $parseHints -FilePath $destinationPath -Notes $notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -736,241 +805,249 @@ function Add-ObservedGap {
     }
 }
 
-Write-Step 'Loading collector profile'
-$collectorProfile = Read-CollectorProfile -Path $CollectorProfilePath
+Start-CollectorTranscript
 
-Write-Step 'Gathering device metadata'
-$deviceContext = Get-DeviceContext
-$bundleId = 'CMTRACE-{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), (ConvertTo-SafeFileName -Value $deviceContext.device.deviceName)
-$bundleRoot = Join-Path $OutputRoot $bundleId
-$evidenceRoot = Join-Path $bundleRoot 'evidence'
+try {
+    Write-Step 'Loading collector profile'
+    $collectorProfile = Read-CollectorProfile -Path $CollectorProfilePath
 
-$logRoot = Join-Path $evidenceRoot 'logs'
-$registryRoot = Join-Path $evidenceRoot 'registry'
-$eventLogRoot = Join-Path $evidenceRoot 'event-logs'
-$exportRoot = Join-Path $evidenceRoot 'exports'
-$screenshotRoot = Join-Path $evidenceRoot 'screenshots'
-$commandOutputRoot = Join-Path $evidenceRoot 'command-output'
+    Write-Step 'Gathering device metadata'
+    $deviceContext = Get-DeviceContext
+    $bundleId = 'CMTRACE-{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), (ConvertTo-SafeFileName -Value $deviceContext.device.deviceName)
+    $bundleRoot = Join-Path $OutputRoot $bundleId
+    $evidenceRoot = Join-Path $bundleRoot 'evidence'
 
-Write-Step 'Creating bundle structure'
-foreach ($path in @($bundleRoot, $evidenceRoot, $logRoot, $registryRoot, $eventLogRoot, $exportRoot, $screenshotRoot, $commandOutputRoot)) {
-    Ensure-Directory -Path $path
-}
+    $logRoot = Join-Path $evidenceRoot 'logs'
+    $registryRoot = Join-Path $evidenceRoot 'registry'
+    $eventLogRoot = Join-Path $evidenceRoot 'event-logs'
+    $exportRoot = Join-Path $evidenceRoot 'exports'
+    $screenshotRoot = Join-Path $evidenceRoot 'screenshots'
+    $commandOutputRoot = Join-Path $evidenceRoot 'command-output'
 
-$commandItems = New-Object System.Collections.Generic.List[object]
-foreach ($commandItem in @($collectorProfile.commands)) {
-    $commandItems.Add($commandItem)
-}
-
-if (-not @($commandItems | Where-Object { $_.command -ieq 'MdmDiagnosticsTool.exe' })) {
-    $commandItems.Add((New-MdmDiagnosticsCommandItem -BundleId $bundleId))
-}
-
-$artifacts = New-Object System.Collections.Generic.List[object]
-$observedGaps = New-Object System.Collections.Generic.List[string]
-
-Write-Step 'Collecting curated IME logs'
-foreach ($logItem in @($collectorProfile.logs)) {
-    $matchedFiles = @(Get-ChildItem -Path $logItem.sourcePattern -File -ErrorAction SilentlyContinue | Sort-Object FullName)
-
-    if ($matchedFiles.Count -eq 0) {
-        $relativePath = Join-RelativePath -Left $logItem.destinationFolder -Right (Split-Path -Leaf $logItem.sourcePattern)
-        $artifact = New-ArtifactRecord -Category 'log' -Family $logItem.family -RelativePath $relativePath -OriginPath $logItem.sourcePattern -Status 'missing' -ParseHints $logItem.parseHints -Notes $logItem.notes
-        $artifacts.Add($artifact)
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $logItem.sourcePattern -Reason $null
-        continue
+    Write-Step 'Creating bundle structure'
+    foreach ($path in @($bundleRoot, $evidenceRoot, $logRoot, $registryRoot, $eventLogRoot, $exportRoot, $screenshotRoot, $commandOutputRoot)) {
+        Ensure-Directory -Path $path
     }
 
-    foreach ($sourceFile in $matchedFiles) {
-        $relativePath = Join-RelativePath -Left $logItem.destinationFolder -Right $sourceFile.Name
+    $commandItems = New-Object System.Collections.Generic.List[object]
+    foreach ($commandItem in @($collectorProfile.commands)) {
+        $commandItems.Add($commandItem)
+    }
+
+    if (-not @($commandItems | Where-Object { $_.command -ieq 'MdmDiagnosticsTool.exe' })) {
+        $commandItems.Add((New-MdmDiagnosticsCommandItem -BundleId $bundleId))
+    }
+
+    $artifacts = New-Object System.Collections.Generic.List[object]
+    $observedGaps = New-Object System.Collections.Generic.List[string]
+
+    Write-Step 'Collecting curated IME logs'
+    foreach ($logItem in @($collectorProfile.logs)) {
+        $matchedFiles = @(Get-ChildItem -Path $logItem.sourcePattern -File -ErrorAction SilentlyContinue | Sort-Object FullName)
+
+        if ($matchedFiles.Count -eq 0) {
+            $relativePath = Join-RelativePath -Left $logItem.destinationFolder -Right (Split-Path -Leaf $logItem.sourcePattern)
+            $artifact = New-ArtifactRecord -Category 'log' -Family $logItem.family -RelativePath $relativePath -OriginPath $logItem.sourcePattern -Status 'missing' -ParseHints $logItem.parseHints -Notes $logItem.notes
+            $artifacts.Add($artifact)
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $logItem.sourcePattern -Reason $null
+            continue
+        }
+
+        foreach ($sourceFile in $matchedFiles) {
+            $relativePath = Join-RelativePath -Left $logItem.destinationFolder -Right $sourceFile.Name
+            $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
+
+            try {
+                Ensure-ParentDirectory -Path $destinationPath
+                Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationPath -Force
+                $artifact = New-ArtifactRecord -Category 'log' -Family $logItem.family -RelativePath $relativePath -OriginPath $sourceFile.FullName -Status 'collected' -ParseHints $logItem.parseHints -FilePath $destinationPath -Notes $logItem.notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            }
+            catch {
+                $artifact = New-ArtifactRecord -Category 'log' -Family $logItem.family -RelativePath $relativePath -OriginPath $sourceFile.FullName -Status 'failed' -ParseHints $logItem.parseHints -Notes (Protect-SecretText -Text $_.Exception.Message)
+                Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $sourceFile.FullName -Reason (Protect-SecretText -Text $_.Exception.Message)
+            }
+
+            $artifacts.Add($artifact)
+        }
+    }
+
+    Write-Step 'Exporting curated registry paths'
+    foreach ($registryItem in @($collectorProfile.registry)) {
+        $relativePath = Join-RelativePath -Left 'evidence/registry' -Right $registryItem.fileName
         $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
 
+        if (-not (Test-RegistryKeyExists -RegistryPath $registryItem.path)) {
+            $artifact = New-ArtifactRecord -Category 'registry' -Family $registryItem.family -RelativePath $relativePath -OriginPath $registryItem.path -Status 'missing' -ParseHints @('reg') -Notes $registryItem.notes
+            $artifacts.Add($artifact)
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $registryItem.path -Reason $null
+            continue
+        }
+
+        Ensure-ParentDirectory -Path $destinationPath
+        & reg.exe export $registryItem.path $destinationPath /y | Out-Null
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -eq 0 -and (Test-Path -LiteralPath $destinationPath)) {
+            $artifact = New-ArtifactRecord -Category 'registry' -Family $registryItem.family -RelativePath $relativePath -OriginPath $registryItem.path -Status 'collected' -ParseHints @('reg') -FilePath $destinationPath -Notes $registryItem.notes
+        }
+        else {
+            $notes = 'reg.exe export failed with exit code {0}.' -f $exitCode
+            $artifact = New-ArtifactRecord -Category 'registry' -Family $registryItem.family -RelativePath $relativePath -OriginPath $registryItem.path -Status 'failed' -ParseHints @('reg') -Notes $notes
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $registryItem.path -Reason $notes
+        }
+
+        $artifacts.Add($artifact)
+    }
+
+    Write-Step 'Exporting curated event channels'
+    foreach ($eventItem in @($collectorProfile.eventLogs)) {
+        $relativePath = Join-RelativePath -Left 'evidence/event-logs' -Right $eventItem.fileName
+        $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
+
+        if (-not (Test-EventChannelExists -Channel $eventItem.channel)) {
+            $artifact = New-ArtifactRecord -Category 'event-log' -Family $eventItem.family -RelativePath $relativePath -OriginPath $eventItem.channel -Status 'missing' -ParseHints @('evtx') -Notes $eventItem.notes
+            $artifacts.Add($artifact)
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $eventItem.channel -Reason $null
+            continue
+        }
+
+        Ensure-ParentDirectory -Path $destinationPath
+        & wevtutil.exe epl $eventItem.channel $destinationPath /ow:true | Out-Null
+        $exitCode = $LASTEXITCODE
+
+        if ($exitCode -eq 0 -and (Test-Path -LiteralPath $destinationPath)) {
+            $artifact = New-ArtifactRecord -Category 'event-log' -Family $eventItem.family -RelativePath $relativePath -OriginPath $eventItem.channel -Status 'collected' -ParseHints @('evtx') -FilePath $destinationPath -Notes $eventItem.notes
+        }
+        else {
+            $notes = 'wevtutil.exe epl failed with exit code {0}.' -f $exitCode
+            $artifact = New-ArtifactRecord -Category 'event-log' -Family $eventItem.family -RelativePath $relativePath -OriginPath $eventItem.channel -Status 'failed' -ParseHints @('evtx') -Notes $notes
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $eventItem.channel -Reason $notes
+        }
+
+        $artifacts.Add($artifact)
+    }
+
+    Write-Step 'Collecting exported file artifacts'
+    foreach ($exportItem in @($collectorProfile.exports)) {
+        $resolvedSourcePath = Expand-EnvironmentPath -Path $exportItem.sourcePath
+        $destinationFolder = if ([string]::IsNullOrWhiteSpace($exportItem.destinationFolder)) { 'evidence/exports' } else { $exportItem.destinationFolder }
+        $exportFileName = if ([string]::IsNullOrWhiteSpace($exportItem.fileName)) { Split-Path -Leaf $resolvedSourcePath } else { $exportItem.fileName }
+        $relativePath = Join-RelativePath -Left $destinationFolder -Right $exportFileName
+        $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
+
+        if ([string]::IsNullOrWhiteSpace($resolvedSourcePath) -or -not (Test-Path -LiteralPath $resolvedSourcePath -PathType Leaf)) {
+            $artifact = New-ArtifactRecord -Category 'export' -Family $exportItem.family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'missing' -ParseHints $exportItem.parseHints -Notes $exportItem.notes
+            $artifacts.Add($artifact)
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $resolvedSourcePath -Reason $null
+            continue
+        }
+
         try {
-            Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationPath -Force
-            $artifact = New-ArtifactRecord -Category 'log' -Family $logItem.family -RelativePath $relativePath -OriginPath $sourceFile.FullName -Status 'collected' -ParseHints $logItem.parseHints -FilePath $destinationPath -Notes $logItem.notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            Ensure-ParentDirectory -Path $destinationPath
+            Copy-Item -LiteralPath $resolvedSourcePath -Destination $destinationPath -Force
+            $sourceFile = Get-Item -LiteralPath $resolvedSourcePath -ErrorAction Stop
+            $artifact = New-ArtifactRecord -Category 'export' -Family $exportItem.family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'collected' -ParseHints $exportItem.parseHints -FilePath $destinationPath -Notes $exportItem.notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
         }
         catch {
-            $artifact = New-ArtifactRecord -Category 'log' -Family $logItem.family -RelativePath $relativePath -OriginPath $sourceFile.FullName -Status 'failed' -ParseHints $logItem.parseHints -Notes $_.Exception.Message
-            Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $sourceFile.FullName -Reason $_.Exception.Message
+            $artifact = New-ArtifactRecord -Category 'export' -Family $exportItem.family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'failed' -ParseHints $exportItem.parseHints -Notes (Protect-SecretText -Text $_.Exception.Message)
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $resolvedSourcePath -Reason (Protect-SecretText -Text $_.Exception.Message)
         }
 
         $artifacts.Add($artifact)
     }
-}
 
-Write-Step 'Exporting curated registry paths'
-foreach ($registryItem in @($collectorProfile.registry)) {
-    $relativePath = Join-RelativePath -Left 'evidence/registry' -Right $registryItem.fileName
-    $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
+    Write-Step 'Collecting command outputs'
+    foreach ($commandItem in $commandItems) {
+        $relativePath = Join-RelativePath -Left 'evidence/command-output' -Right $commandItem.fileName
+        $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
+        $commandInvocationText = Get-CommandInvocationText -CommandItem $commandItem
 
-    if (-not (Test-RegistryKeyExists -RegistryPath $registryItem.path)) {
-        $artifact = New-ArtifactRecord -Category 'registry' -Family $registryItem.family -RelativePath $relativePath -OriginPath $registryItem.path -Status 'missing' -ParseHints @('reg') -Notes $registryItem.notes
+        if ($commandItem.id -eq 'dsregcmd-status') {
+            $capture = $deviceContext.dsregStatus.capture
+        }
+        else {
+            $capture = Invoke-ExternalCommandCapture -Command $commandItem.command -Arguments @($commandItem.arguments)
+        }
+
+        if (-not $capture.found) {
+            $artifact = New-ArtifactRecord -Category 'command-output' -Family $commandItem.family -RelativePath $relativePath -OriginPath $commandInvocationText -Status 'missing' -ParseHints @('plain-text') -Notes $capture.error
+            $artifacts.Add($artifact)
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $commandItem.command -Reason $capture.error
+            continue
+        }
+
+        $commandText = if ([string]::IsNullOrWhiteSpace($capture.output)) { '[no output returned]' } else { $capture.output }
+        Write-TextFile -Content $commandText -Path $destinationPath
+
+        if ($capture.exitCode -eq 0) {
+            $artifact = New-ArtifactRecord -Category 'command-output' -Family $commandItem.family -RelativePath $relativePath -OriginPath $commandInvocationText -Status 'collected' -ParseHints @('plain-text') -FilePath $destinationPath -Notes $commandItem.notes
+        }
+        else {
+            $notes = '{0} exited with code {1}.' -f $commandItem.command, $capture.exitCode
+            $artifact = New-ArtifactRecord -Category 'command-output' -Family $commandItem.family -RelativePath $relativePath -OriginPath $commandInvocationText -Status 'failed' -ParseHints @('plain-text') -FilePath $destinationPath -Notes $notes
+            Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $commandItem.command -Reason $notes
+        }
+
         $artifacts.Add($artifact)
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $registryItem.path -Reason $null
-        continue
+        Add-GeneratedCommandArtifacts -Artifacts $artifacts -ObservedGaps $observedGaps -CommandItem $commandItem -BundleRoot $bundleRoot
     }
 
-    & reg.exe export $registryItem.path $destinationPath /y | Out-Null
-    $exitCode = $LASTEXITCODE
+    $notesPath = Join-Path $bundleRoot 'notes.md'
+    $manifestPath = Join-Path $bundleRoot 'manifest.json'
 
-    if ($exitCode -eq 0 -and (Test-Path -LiteralPath $destinationPath)) {
-        $artifact = New-ArtifactRecord -Category 'registry' -Family $registryItem.family -RelativePath $relativePath -OriginPath $registryItem.path -Status 'collected' -ParseHints @('reg') -FilePath $destinationPath -Notes $registryItem.notes
-    }
-    else {
-        $notes = 'reg.exe export failed with exit code {0}.' -f $exitCode
-        $artifact = New-ArtifactRecord -Category 'registry' -Family $registryItem.family -RelativePath $relativePath -OriginPath $registryItem.path -Status 'failed' -ParseHints @('reg') -Notes $notes
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $registryItem.path -Reason $notes
+    $statusCounts = [ordered]@{
+        collected = @($artifacts | Where-Object { $_.status -eq 'collected' }).Count
+        missing   = @($artifacts | Where-Object { $_.status -eq 'missing' }).Count
+        failed    = @($artifacts | Where-Object { $_.status -eq 'failed' }).Count
+        skipped   = @($artifacts | Where-Object { $_.status -eq 'skipped' }).Count
     }
 
-    $artifacts.Add($artifact)
-}
+    $uploadRequested = (-not $LocalOnly) -and (-not [string]::IsNullOrWhiteSpace($SasUrl))
+    $sanitizedBundleLabel = ConvertTo-SafeFileName -Value $BundleLabel
+    $zipFileName = ('{0}.zip' -f $bundleId)
+    $zipPath = Join-Path $OutputRoot $zipFileName
 
-Write-Step 'Exporting curated event channels'
-foreach ($eventItem in @($collectorProfile.eventLogs)) {
-    $relativePath = Join-RelativePath -Left 'evidence/event-logs' -Right $eventItem.fileName
-    $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
-
-    if (-not (Test-EventChannelExists -Channel $eventItem.channel)) {
-        $artifact = New-ArtifactRecord -Category 'event-log' -Family $eventItem.family -RelativePath $relativePath -OriginPath $eventItem.channel -Status 'missing' -ParseHints @('evtx') -Notes $eventItem.notes
-        $artifacts.Add($artifact)
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $eventItem.channel -Reason $null
-        continue
+    $uploadInfo = [ordered]@{
+        requested           = $uploadRequested
+        destination         = (Get-RedactedUploadUrl -Url $SasUrl)
+        blobName            = $null
+        collectorRunLogPath = $script:CollectorRunLogPath
     }
 
-    & wevtutil.exe epl $eventItem.channel $destinationPath /ow:true | Out-Null
-    $exitCode = $LASTEXITCODE
-
-    if ($exitCode -eq 0 -and (Test-Path -LiteralPath $destinationPath)) {
-        $artifact = New-ArtifactRecord -Category 'event-log' -Family $eventItem.family -RelativePath $relativePath -OriginPath $eventItem.channel -Status 'collected' -ParseHints @('evtx') -FilePath $destinationPath -Notes $eventItem.notes
-    }
-    else {
-        $notes = 'wevtutil.exe epl failed with exit code {0}.' -f $exitCode
-        $artifact = New-ArtifactRecord -Category 'event-log' -Family $eventItem.family -RelativePath $relativePath -OriginPath $eventItem.channel -Status 'failed' -ParseHints @('evtx') -Notes $notes
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $eventItem.channel -Reason $notes
+    if ($uploadRequested) {
+        $resolvedUpload = Resolve-BlobUploadUrl -Url $SasUrl -DefaultBlobName $zipFileName -RequestedBlobName $BlobName
+        $uploadInfo.destination = $resolvedUpload.redactedUrl
+        $uploadInfo.blobName = $resolvedUpload.blobName
     }
 
-    $artifacts.Add($artifact)
-}
-
-Write-Step 'Collecting exported file artifacts'
-foreach ($exportItem in @($collectorProfile.exports)) {
-    $resolvedSourcePath = Expand-EnvironmentPath -Path $exportItem.sourcePath
-    $destinationFolder = if ([string]::IsNullOrWhiteSpace($exportItem.destinationFolder)) { 'evidence/exports' } else { $exportItem.destinationFolder }
-    $exportFileName = if ([string]::IsNullOrWhiteSpace($exportItem.fileName)) { Split-Path -Leaf $resolvedSourcePath } else { $exportItem.fileName }
-    $relativePath = Join-RelativePath -Left $destinationFolder -Right $exportFileName
-    $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
-
-    if ([string]::IsNullOrWhiteSpace($resolvedSourcePath) -or -not (Test-Path -LiteralPath $resolvedSourcePath -PathType Leaf)) {
-        $artifact = New-ArtifactRecord -Category 'export' -Family $exportItem.family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'missing' -ParseHints $exportItem.parseHints -Notes $exportItem.notes
-        $artifacts.Add($artifact)
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $resolvedSourcePath -Reason $null
-        continue
-    }
-
-    try {
-        Copy-Item -LiteralPath $resolvedSourcePath -Destination $destinationPath -Force
-        $sourceFile = Get-Item -LiteralPath $resolvedSourcePath -ErrorAction Stop
-        $artifact = New-ArtifactRecord -Category 'export' -Family $exportItem.family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'collected' -ParseHints $exportItem.parseHints -FilePath $destinationPath -Notes $exportItem.notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    }
-    catch {
-        $artifact = New-ArtifactRecord -Category 'export' -Family $exportItem.family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'failed' -ParseHints $exportItem.parseHints -Notes $_.Exception.Message
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $resolvedSourcePath -Reason $_.Exception.Message
-    }
-
-    $artifacts.Add($artifact)
-}
-
-Write-Step 'Collecting command outputs'
-foreach ($commandItem in $commandItems) {
-    $relativePath = Join-RelativePath -Left 'evidence/command-output' -Right $commandItem.fileName
-    $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
-    $commandInvocationText = Get-CommandInvocationText -CommandItem $commandItem
-
-    if ($commandItem.id -eq 'dsregcmd-status') {
-        $capture = $deviceContext.dsregStatus.capture
-    }
-    else {
-        $capture = Invoke-ExternalCommandCapture -Command $commandItem.command -Arguments @($commandItem.arguments)
-    }
-
-    if (-not $capture.found) {
-        $artifact = New-ArtifactRecord -Category 'command-output' -Family $commandItem.family -RelativePath $relativePath -OriginPath $commandInvocationText -Status 'missing' -ParseHints @('plain-text') -Notes $capture.error
-        $artifacts.Add($artifact)
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'missing' -Origin $commandItem.command -Reason $capture.error
-        continue
-    }
-
-    $commandText = if ([string]::IsNullOrWhiteSpace($capture.output)) { '[no output returned]' } else { $capture.output }
-    Write-TextFile -Content $commandText -Path $destinationPath
-
-    if ($capture.exitCode -eq 0) {
-        $artifact = New-ArtifactRecord -Category 'command-output' -Family $commandItem.family -RelativePath $relativePath -OriginPath $commandInvocationText -Status 'collected' -ParseHints @('plain-text') -FilePath $destinationPath -Notes $commandItem.notes
-    }
-    else {
-        $notes = '{0} exited with code {1}.' -f $commandItem.command, $capture.exitCode
-        $artifact = New-ArtifactRecord -Category 'command-output' -Family $commandItem.family -RelativePath $relativePath -OriginPath $commandInvocationText -Status 'failed' -ParseHints @('plain-text') -FilePath $destinationPath -Notes $notes
-        Add-ObservedGap -ObservedGaps $observedGaps -Status 'failed' -Origin $commandItem.command -Reason $notes
-    }
-
-    $artifacts.Add($artifact)
-    Add-GeneratedCommandArtifacts -Artifacts $artifacts -ObservedGaps $observedGaps -CommandItem $commandItem -BundleRoot $bundleRoot
-}
-
-$notesPath = Join-Path $bundleRoot 'notes.md'
-$manifestPath = Join-Path $bundleRoot 'manifest.json'
-
-$statusCounts = [ordered]@{
-    collected = @($artifacts | Where-Object { $_.status -eq 'collected' }).Count
-    missing   = @($artifacts | Where-Object { $_.status -eq 'missing' }).Count
-    failed    = @($artifacts | Where-Object { $_.status -eq 'failed' }).Count
-    skipped   = @($artifacts | Where-Object { $_.status -eq 'skipped' }).Count
-}
-
-$uploadRequested = (-not $LocalOnly) -and (-not [string]::IsNullOrWhiteSpace($SasUrl))
-$sanitizedBundleLabel = ConvertTo-SafeFileName -Value $BundleLabel
-$zipFileName = ('{0}.zip' -f $bundleId)
-$zipPath = Join-Path $OutputRoot $zipFileName
-
-$uploadInfo = [ordered]@{
-    requested   = $uploadRequested
-    destination = (Get-RedactedUploadUrl -Url $SasUrl)
-    blobName    = $null
-}
-
-if ($uploadRequested) {
-    $resolvedUpload = Resolve-BlobUploadUrl -Url $SasUrl -DefaultBlobName $zipFileName -RequestedBlobName $BlobName
-    $uploadInfo.destination = $resolvedUpload.redactedUrl
-    $uploadInfo.blobName = $resolvedUpload.blobName
-}
-
-Write-Step 'Writing notes and manifest'
-$manifestCreatedUtc = Get-UtcTimestamp
-$manifestCaseReference = if ([string]::IsNullOrWhiteSpace($CaseReference)) { $bundleId } else { $CaseReference }
-$operatorContactValue = if ([string]::IsNullOrWhiteSpace($OperatorContact)) { $null } else { $OperatorContact }
-$analysisObservedGaps = if ($observedGaps.Count -gt 0) { @($observedGaps) } else { @('No collection gaps were recorded during bundle creation.') }
-$observedGapSummary = [string]::Join('; ', @($analysisObservedGaps | ForEach-Object { [string]$_ }))
-$artifactArray = @($artifacts.ToArray())
-$primaryEntryPoints = @(
-    'evidence/logs',
-    'evidence/registry',
-    'evidence/event-logs',
-    'evidence/exports',
-    'evidence/screenshots',
-    'evidence/command-output'
-)
-$expectedEvidence = @(
-    [ordered]@{
-        category     = 'log'
-        relativePath = 'evidence/logs'
-        required     = $true
-        reason       = 'Primary troubleshooting timeline and parser input.'
-    },
-    [ordered]@{
-        category     = 'registry'
-        relativePath = 'evidence/registry'
-        required     = $false
-        reason       = 'Useful for enrollment, policy, and IME state.'
-    },
+    Write-Step 'Writing notes and manifest'
+    $manifestCreatedUtc = Get-UtcTimestamp
+    $manifestCaseReference = if ([string]::IsNullOrWhiteSpace($CaseReference)) { $bundleId } else { $CaseReference }
+    $operatorContactValue = if ([string]::IsNullOrWhiteSpace($OperatorContact)) { $null } else { $OperatorContact }
+    $analysisObservedGaps = if ($observedGaps.Count -gt 0) { @($observedGaps) } else { @('No collection gaps were recorded during bundle creation.') }
+    $observedGapSummary = [string]::Join('; ', @($analysisObservedGaps | ForEach-Object { [string]$_ }))
+    $artifactArray = @($artifacts.ToArray())
+    $primaryEntryPoints = @(
+        'evidence/logs',
+        'evidence/registry',
+        'evidence/event-logs',
+        'evidence/exports',
+        'evidence/screenshots',
+        'evidence/command-output'
+    )
+    $expectedEvidence = @(
+        [ordered]@{
+            category     = 'log'
+            relativePath = 'evidence/logs'
+            required     = $true
+            reason       = 'Primary troubleshooting timeline and parser input.'
+        },
+        [ordered]@{
+            category     = 'registry'
+            relativePath = 'evidence/registry'
+            required     = $false
+            reason       = 'Useful for enrollment, policy, and IME state.'
+        },
     [ordered]@{
         category     = 'event-log'
         relativePath = 'evidence/event-logs'
@@ -1001,6 +1078,7 @@ $notesContent = @"
 - Started: $(Get-UtcTimestamp)
 - Device: $($deviceContext.device.deviceName)
 - Scope: Curated Intune evidence collection generated by Invoke-CmtraceEvidenceCollection.ps1.
+- Collector run log: $($script:CollectorRunLogPath)
 
 ## Collection Notes
 
@@ -1092,8 +1170,8 @@ if ($uploadRequested) {
         $uploadStatus.statusCode = $uploadResult.statusCode
     }
     catch {
-        $uploadStatus.error = $_.Exception.Message
-        Write-Warning ('Upload failed: {0}' -f $_.Exception.Message)
+        $uploadStatus.error = Protect-SecretText -Text $_.Exception.Message
+        Write-Warning ('Upload failed: {0}' -f $uploadStatus.error)
     }
 }
 else {
@@ -1106,9 +1184,19 @@ $result = [pscustomobject]@{
     ManifestPath   = $manifestPath
     NotesPath      = $notesPath
     ZipPath        = $zipPath
+    CollectorLogPath = $script:CollectorRunLogPath
     ArtifactCounts = $statusCounts
     UploadStatus   = $uploadStatus
 }
 
 Write-Step 'Collection complete'
-$result
+    $result
+}
+catch {
+    $sanitizedMessage = Protect-SecretText -Text $_.Exception.Message
+    Write-Error ('Collector failed: {0}' -f $sanitizedMessage)
+    throw $sanitizedMessage
+}
+finally {
+    Stop-CollectorTranscript
+}
