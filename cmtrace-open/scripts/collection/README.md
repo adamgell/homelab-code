@@ -14,6 +14,10 @@ This folder contains a dependency-light PowerShell collector for building a loca
 - No Azure PowerShell modules.
 - No external dependencies beyond built-in PowerShell cmdlets and native Windows tools such as `reg.exe`, `wevtutil.exe`, and `dsregcmd.exe`.
 
+## Pre-requirments
+
+- **Powershell 7.5.4**
+
 ## Examples
 
 Local-only collection:
@@ -82,9 +86,11 @@ The resulting zip is created beside the bundle root.
 ## Bootstrap behavior
 
 - `Invoke-CmtraceEvidenceBootstrap.ps1` is intended for assignment-side or other bootstrap execution where you do not want the full collector to run inline.
-- The bootstrap downloads the collector and profile from HTTPS URLs into `C:\ProgramData\CmtraceOpen\Staging`.
+- The bootstrap downloads the collector and profile from HTTPS URLs into `C:\ProgramData\CmtraceOpen\Staging` using fixed staged filenames: `Invoke-CmtraceEvidenceCollection.ps1` and `intune-evidence-profile.json`.
 - The bootstrap accepts a direct upload SAS URL and passes it to the collector scheduled task when not running in local-only mode.
 - The bootstrap validates that the staged collector payload parses as PowerShell and that the staged profile parses as JSON before it registers the scheduled task.
+- `CollectorProfileUrl` must return raw JSON content. Do not point it at an HTML landing page, portal download page, or any URL that wraps the JSON in another response format.
+- If Intune or IME logs appear to show a space inserted into `intune-evidence-profile.json`, that is typically log line wrapping or copied-output formatting rather than a different filename on disk.
 - The bootstrap registers a one-time `SYSTEM` scheduled task and writes state to `C:\ProgramData\CmtraceOpen\State\collection-bootstrap.json` so repeated execution can be throttled.
 - The bootstrap ships with placeholder URLs on `example.invalid`; pass real HTTPS payload URLs at execution time.
 - Use commit-pinned raw GitHub URLs instead of `main` if you want deployment-time payload pinning.
@@ -124,3 +130,4 @@ The resulting zip is created beside the bundle root.
 - `Compress-Archive` uses the built-in ZIP implementation and is sufficient for typical evidence bundles. Very large bundles should still be sized with care.
 - Use short-lived SAS URLs with write permissions scoped only to the target container or blob path.
 - If you use the bootstrap flow, keep the upload SAS short-lived and do not commit live SAS values into repo-tracked bootstrap or profile files.
+- If profile download validation fails, the bootstrap now reports the staged path, the source URL with query redacted, and a short payload preview so it is easier to spot non-JSON responses.

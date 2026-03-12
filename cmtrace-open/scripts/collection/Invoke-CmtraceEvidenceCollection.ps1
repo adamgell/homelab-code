@@ -167,6 +167,158 @@ function Get-ObjectPropertyValue {
     return $property.Value
 }
 
+function Test-ArrayValue {
+    param(
+        [AllowNull()]
+        [object]$Value
+    )
+
+    return ($Value -is [System.Array]) -or ($Value -is [System.Collections.IList])
+}
+
+function Assert-ProfileRequiredString {
+    param(
+        [AllowNull()]
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Context,
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $value = Get-ObjectPropertyValue -InputObject $InputObject -Name $Name
+    if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace([string]$value)) {
+        throw ('Collector profile is invalid: {0}. {1}.{2} must be a non-empty string.' -f $Path, $Context, $Name)
+    }
+}
+
+function Assert-ProfileRequiredArray {
+    param(
+        [AllowNull()]
+        [object]$InputObject,
+        [Parameter(Mandatory = $true)]
+        [string]$Name,
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    $property = $null
+    if ($null -ne $InputObject) {
+        $property = $InputObject.PSObject.Properties[$Name]
+    }
+
+    if ($null -eq $property) {
+        throw ('Collector profile is invalid: {0}. Top-level section "{1}" is missing.' -f $Path, $Name)
+    }
+
+    if (-not (Test-ArrayValue -Value $property.Value)) {
+        throw ('Collector profile is invalid: {0}. Top-level section "{1}" must be an array.' -f $Path, $Name)
+    }
+}
+
+function Assert-CollectorProfileShape {
+    param(
+        [Parameter(Mandatory = $true)]
+        [object]$CollectorProfile,
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    Assert-ProfileRequiredString -InputObject $CollectorProfile -Name 'profileName' -Context 'profile' -Path $Path
+    Assert-ProfileRequiredString -InputObject $CollectorProfile -Name 'profileVersion' -Context 'profile' -Path $Path
+
+    foreach ($sectionName in @('logs', 'registry', 'eventLogs', 'exports', 'commands')) {
+        Assert-ProfileRequiredArray -InputObject $CollectorProfile -Name $sectionName -Path $Path
+    }
+
+    $sectionDefinitions = @(
+        @{
+            name             = 'logs'
+            requiredStrings  = @('id', 'family', 'sourcePattern', 'destinationFolder')
+            optionalArrays   = @('parseHints')
+        },
+        @{
+            name             = 'registry'
+            requiredStrings  = @('id', 'family', 'path', 'fileName')
+            optionalArrays   = @()
+        },
+        @{
+            name             = 'eventLogs'
+            requiredStrings  = @('id', 'family', 'channel', 'fileName')
+            optionalArrays   = @()
+        },
+        @{
+            name             = 'exports'
+            requiredStrings  = @('id', 'family', 'sourcePath')
+            optionalArrays   = @('parseHints')
+        },
+        @{
+            name             = 'commands'
+            requiredStrings  = @('id', 'family', 'command', 'fileName')
+            optionalArrays   = @('arguments')
+        }
+    )
+
+    foreach ($sectionDefinition in $sectionDefinitions) {
+        $sectionName = [string]$sectionDefinition.name
+        $sectionItems = @(Get-ObjectPropertyValue -InputObject $CollectorProfile -Name $sectionName -DefaultValue @())
+
+        for ($index = 0; $index -lt $sectionItems.Count; $index++) {
+            $item = $sectionItems[$index]
+            $itemContext = '{0}[{1}]' -f $sectionName, $index
+
+            if ($null -eq $item) {
+                throw ('Collector profile is invalid: {0}. {1} must be an object.' -f $Path, $itemContext)
+            }
+
+            foreach ($propertyName in @($sectionDefinition.requiredStrings)) {
+                Assert-ProfileRequiredString -InputObject $item -Name $propertyName -Context $itemContext -Path $Path
+            }
+
+            foreach ($propertyName in @($sectionDefinition.optionalArrays)) {
+                $propertyValue = Get-ObjectPropertyValue -InputObject $item -Name $propertyName
+                if ($null -ne $propertyValue -and -not (Test-ArrayValue -Value $propertyValue)) {
+                    throw ('Collector profile is invalid: {0}. {1}.{2} must be an array when present.' -f $Path, $itemContext, $propertyName)
+                }
+            }
+        }
+    }
+}
+
+function Read-CollectorProfile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw ('Collector profile file was not found: {0}' -f $Path)
+    }
+
+    try {
+        $rawProfile = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    }
+    catch {
+        throw ('Collector profile file could not be read: {0}. Error: {1}' -f $Path, $_.Exception.Message)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($rawProfile)) {
+        throw ('Collector profile file is empty: {0}' -f $Path)
+    }
+
+    try {
+        $collectorProfile = $rawProfile | ConvertFrom-Json -Depth 20 -ErrorAction Stop
+    }
+    catch {
+        throw ('Collector profile contains invalid JSON: {0}. Error: {1}' -f $Path, $_.Exception.Message)
+    }
+
+    Assert-CollectorProfileShape -Profile $collectorProfile -Path $Path
+    return $collectorProfile
+}
+
 function New-ArtifactId {
     param(
         [Parameter(Mandatory = $true)]
@@ -585,11 +737,7 @@ function Add-ObservedGap {
 }
 
 Write-Step 'Loading collector profile'
-if (-not (Test-Path -LiteralPath $CollectorProfilePath)) {
-    throw ('Collector profile was not found: {0}' -f $CollectorProfilePath)
-}
-
-$profile = Get-Content -LiteralPath $CollectorProfilePath -Raw | ConvertFrom-Json
+$collectorProfile = Read-CollectorProfile -Path $CollectorProfilePath
 
 Write-Step 'Gathering device metadata'
 $deviceContext = Get-DeviceContext
@@ -610,7 +758,7 @@ foreach ($path in @($bundleRoot, $evidenceRoot, $logRoot, $registryRoot, $eventL
 }
 
 $commandItems = New-Object System.Collections.Generic.List[object]
-foreach ($commandItem in @($profile.commands)) {
+foreach ($commandItem in @($collectorProfile.commands)) {
     $commandItems.Add($commandItem)
 }
 
@@ -622,7 +770,7 @@ $artifacts = New-Object System.Collections.Generic.List[object]
 $observedGaps = New-Object System.Collections.Generic.List[string]
 
 Write-Step 'Collecting curated IME logs'
-foreach ($logItem in @($profile.logs)) {
+foreach ($logItem in @($collectorProfile.logs)) {
     $matchedFiles = @(Get-ChildItem -Path $logItem.sourcePattern -File -ErrorAction SilentlyContinue | Sort-Object FullName)
 
     if ($matchedFiles.Count -eq 0) {
@@ -651,7 +799,7 @@ foreach ($logItem in @($profile.logs)) {
 }
 
 Write-Step 'Exporting curated registry paths'
-foreach ($registryItem in @($profile.registry)) {
+foreach ($registryItem in @($collectorProfile.registry)) {
     $relativePath = Join-RelativePath -Left 'evidence/registry' -Right $registryItem.fileName
     $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
 
@@ -678,7 +826,7 @@ foreach ($registryItem in @($profile.registry)) {
 }
 
 Write-Step 'Exporting curated event channels'
-foreach ($eventItem in @($profile.eventLogs)) {
+foreach ($eventItem in @($collectorProfile.eventLogs)) {
     $relativePath = Join-RelativePath -Left 'evidence/event-logs' -Right $eventItem.fileName
     $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
 
@@ -705,7 +853,7 @@ foreach ($eventItem in @($profile.eventLogs)) {
 }
 
 Write-Step 'Collecting exported file artifacts'
-foreach ($exportItem in @($profile.exports)) {
+foreach ($exportItem in @($collectorProfile.exports)) {
     $resolvedSourcePath = Expand-EnvironmentPath -Path $exportItem.sourcePath
     $destinationFolder = if ([string]::IsNullOrWhiteSpace($exportItem.destinationFolder)) { 'evidence/exports' } else { $exportItem.destinationFolder }
     $exportFileName = if ([string]::IsNullOrWhiteSpace($exportItem.fileName)) { Split-Path -Leaf $resolvedSourcePath } else { $exportItem.fileName }
@@ -888,7 +1036,7 @@ $manifest = [ordered]@{
     }
     collection       = [ordered]@{
         method              = 'intune-powershell-script'
-        collectorProfile    = $profile.profileName
+        collectorProfile    = $collectorProfile.profileName
         collectorVersion    = $script:CollectorVersion
         sourceRoot          = $OutputRoot
         collectedBy         = $OperatorName

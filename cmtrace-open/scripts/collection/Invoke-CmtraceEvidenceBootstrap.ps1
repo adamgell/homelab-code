@@ -6,9 +6,9 @@ param(
     [string]$TaskName = 'CmtraceOpen-EvidenceCollection-Once',
     [int]$DelayMinutes = 2,
     [int]$ThrottleHours = 24,
-    [string]$CollectorScriptUrl = 'https://example.invalid/cmtrace-open/Invoke-CmtraceEvidenceCollection.ps1',
-    [string]$CollectorProfileUrl = 'https://example.invalid/cmtrace-open/intune-evidence-profile.json',
-    [string]$SasUrl = '',
+    [string]$CollectorProfileUrl = '', #fill out
+    [string]$CollectorScriptUrl = '', #fill out
+    [string]$SasUrl = '', #fill out
     [string]$BundleLabel = 'intune-endpoint-evidence',
     [string]$CaseReference = '',
     [string]$BlobName = '',
@@ -168,21 +168,121 @@ function Test-JsonFile {
     }
 }
 
+function Get-RedactedUrl {
+    param(
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return '[not provided]'
+    }
+
+    $uri = $null
+    if (-not [System.Uri]::TryCreate($Value, [System.UriKind]::Absolute, [ref]$uri)) {
+        return $Value
+    }
+
+    if ([string]::IsNullOrWhiteSpace($uri.Query)) {
+        return $uri.AbsoluteUri
+    }
+
+    return ('{0} [query redacted]' -f $uri.GetLeftPart([System.UriPartial]::Path))
+}
+
+function Get-FilePreview {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path
+    )
+
+    try {
+        $rawContent = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    }
+    catch {
+        return ('[preview unavailable: {0}]' -f $_.Exception.Message)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($rawContent)) {
+        return '[empty file]'
+    }
+
+    $normalizedPreview = (($rawContent -replace [char]0xFEFF, '') -replace '\r?\n', ' ')
+    $normalizedPreview = ($normalizedPreview -replace '\s+', ' ').Trim()
+
+    if ($normalizedPreview.Length -gt 200) {
+        return ('{0}...' -f $normalizedPreview.Substring(0, 200))
+    }
+
+    return $normalizedPreview
+}
+
+function Get-JsonPayloadHint {
+    param(
+        [AllowEmptyString()]
+        [string]$Preview
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Preview) -or $Preview -eq '[empty file]') {
+        return 'Payload is empty.'
+    }
+
+    $trimmedPreview = $Preview.TrimStart()
+    if ($trimmedPreview.StartsWith('<')) {
+        return 'Payload preview suggests HTML or XML content rather than JSON.'
+    }
+
+    if ((-not $trimmedPreview.StartsWith('{')) -and (-not $trimmedPreview.StartsWith('['))) {
+        return 'Payload preview suggests plain text or another non-JSON format.'
+    }
+
+    return 'Payload could not be parsed as JSON.'
+}
+
+function Assert-ValidJsonFile {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Path,
+        [Parameter(Mandatory = $true)]
+        [string]$SourceContext
+    )
+
+    try {
+        $rawContent = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+    }
+    catch {
+        throw ('Downloaded profile payload could not be read. Staged path: {0}. Source: {1}. Error: {2}' -f $Path, (Get-RedactedUrl -Value $SourceContext), $_.Exception.Message)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($rawContent)) {
+        throw ('Downloaded profile payload is empty. Staged path: {0}. Source: {1}.' -f $Path, (Get-RedactedUrl -Value $SourceContext))
+    }
+
+    try {
+        $rawContent | ConvertFrom-Json -Depth 20 -ErrorAction Stop | Out-Null
+    }
+    catch {
+        $preview = Get-FilePreview -Path $Path
+        $payloadHint = Get-JsonPayloadHint -Preview $preview
+        throw ('Downloaded profile payload is not valid JSON. Staged path: {0}. Source: {1}. {2} Parse error: {3}. Payload preview: {4}' -f $Path, (Get-RedactedUrl -Value $SourceContext), $payloadHint, $_.Exception.Message, $preview)
+    }
+}
+
 function Validate-StagedPayloads {
     param(
         [Parameter(Mandatory = $true)]
         [string]$CollectorPath,
         [Parameter(Mandatory = $true)]
-        [string]$ProfilePath
+        [string]$ProfilePath,
+        [Parameter(Mandatory = $true)]
+        [string]$ProfileSource
     )
 
     if (-not (Test-PowerShellFile -Path $CollectorPath)) {
         throw "Downloaded collector payload is not valid PowerShell: $CollectorPath. Check CollectorScriptUrl."
     }
 
-    if (-not (Test-JsonFile -Path $ProfilePath)) {
-        throw "Downloaded profile payload is not valid JSON: $ProfilePath. Check CollectorProfileUrl."
-    }
+    Assert-ValidJsonFile -Path $ProfilePath -SourceContext $ProfileSource
 }
 
 function Get-Task {
@@ -347,7 +447,7 @@ Download-File -Url $CollectorScriptUrl -DestinationPath $stagedCollectorPath
 Download-File -Url $CollectorProfileUrl -DestinationPath $stagedProfilePath
 
 Write-Step 'Validating staged collector payloads'
-Validate-StagedPayloads -CollectorPath $stagedCollectorPath -ProfilePath $stagedProfilePath
+Validate-StagedPayloads -CollectorPath $stagedCollectorPath -ProfilePath $stagedProfilePath -ProfileSource $CollectorProfileUrl
 
 $resolvedSasUrl = $SasUrl
 

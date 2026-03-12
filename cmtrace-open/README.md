@@ -133,6 +133,10 @@ The tracked starter bundle lives under `templates/evidence-bundle/`. Copy that f
 
 The PowerShell collector lives at `scripts/collection/Invoke-CmtraceEvidenceCollection.ps1`. It produces the same high-level bundle shape with `manifest.json`, `notes.md`, and curated `evidence/` content, can run locally on a device, and can also be pushed through Intune or another remote runner without changing the downstream intake shape.
 
+The bootstrap companion at `scripts/collection/Invoke-CmtraceEvidenceBootstrap.ps1` stages the collector and profile under `C:\ProgramData\CmtraceOpen\Staging` with fixed local filenames, including `intune-evidence-profile.json`. If Intune or IME logs appear to show a space inserted in that filename, treat that as line wrapping or copied-output formatting unless the file on disk actually differs. The profile URL must return raw JSON; when it does not, the bootstrap now reports the staged path, source URL context, and a short payload preview to make non-JSON responses easier to identify.
+
+The device REQUIRES Powershell 7.5.4!
+
 ## Architecture
 
 ```text
