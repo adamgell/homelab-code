@@ -81,6 +81,13 @@ pub enum DateFieldOrder {
     DayFirst,
 }
 
+/// Optional parser specialization layered on top of the base parser kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ParserSpecialization {
+    Ime,
+}
+
 /// Rich parser selection metadata returned to the frontend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +98,7 @@ pub struct ParserSelectionInfo {
     pub parse_quality: ParseQuality,
     pub record_framing: RecordFraming,
     pub date_order: Option<DateFieldOrder>,
+    pub specialization: Option<ParserSpecialization>,
 }
 
 /// A single parsed log entry.

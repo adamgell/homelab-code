@@ -1,116 +1,39 @@
-use std::time::Instant;
-
-/// Returns true if running in debug (unoptimized) mode.
-fn is_debug_build() -> bool {
-    cfg!(debug_assertions)
-}
+use std::fs;
+mod common;
 
 #[test]
-fn bench_parse_100k_lines() {
-    let path = "/tmp/test_large.log";
-    if !std::path::Path::new(path).exists() {
-        eprintln!("Skipping benchmark: {} not found", path);
-        return;
-    }
-    if is_debug_build() {
-        eprintln!("Skipping perf assertions in debug build (run with --release)");
-    }
+fn synthetic_ccm_benchmark_fixture_parses_all_records() {
+    let bench_file = common::build_ccm_bench_file(2_048);
+    let path = bench_file.path_string();
+    let content = fs::read_to_string(&path).unwrap();
+    let result = app_lib::parser::parse_file(&path);
 
-    // Measure file read
-    let start = Instant::now();
-    let content = std::fs::read_to_string(path).unwrap();
-    let read_ms = start.elapsed().as_millis();
-
-    let file_size_mb = content.len() as f64 / 1024.0 / 1024.0;
-    let line_count = content.lines().count();
-    eprintln!("File: {:.1} MB, {} lines", file_size_mb, line_count);
-    eprintln!("Read:  {}ms", read_ms);
-
-    // Measure CCM parse
-    let start = Instant::now();
-    let result = app_lib::parser::parse_file(path);
-    let parse_ms = start.elapsed().as_millis();
+    assert_eq!(content.lines().count(), 2_048, "Expected all benchmark lines to be readable");
 
     match result {
         Ok((r, _date_order)) => {
-            eprintln!(
-                "Parse: {}ms ({} entries, {} errors, format: {:?})",
-                parse_ms,
-                r.entries.len(),
-                r.parse_errors,
-                r.format_detected
-            );
-            eprintln!(
-                "Throughput: {:.0} lines/sec",
-                r.entries.len() as f64 / (parse_ms as f64 / 1000.0)
-            );
-            assert!(
-                r.entries.len() > 50000,
-                "Expected at least 50K entries parsed"
-            );
+            assert_eq!(r.entries.len(), 2_048, "Expected all benchmark entries parsed");
+            assert_eq!(r.parse_errors, 0, "Expected the synthetic CCM fixture to parse cleanly");
         }
         Err(e) => panic!("Parse failed: {}", e),
-    }
-
-    // Performance assertion: 100K lines should parse in under 2 seconds (release only)
-    if !is_debug_build() {
-        assert!(
-            parse_ms < 2000,
-            "Parse took {}ms, expected <2000ms",
-            parse_ms
-        );
     }
 }
 
 #[test]
-fn bench_intune_analysis_100k() {
-    let path = "/tmp/test_large.log";
-    if !std::path::Path::new(path).exists() {
-        eprintln!("Skipping benchmark: {} not found", path);
-        return;
-    }
-    if is_debug_build() {
-        eprintln!("Skipping perf assertions in debug build (run with --release)");
-    }
-
-    let start = Instant::now();
-    let content = std::fs::read_to_string(path).unwrap();
-    let read_ms = start.elapsed().as_millis();
-
-    // Measure IME parse
-    let start = Instant::now();
+fn synthetic_intune_benchmark_fixture_matches_pipeline_counts() {
+    let bench_file = common::build_intune_bench_file(1_024);
+    let path = bench_file.path_string();
+    let content = fs::read_to_string(bench_file.path()).unwrap();
     let lines = app_lib::intune::ime_parser::parse_ime_content(&content);
-    let ime_ms = start.elapsed().as_millis();
-    eprintln!("IME parse: {}ms ({} lines)", ime_ms, lines.len());
+    assert_eq!(content.len(), bench_file.file_size_bytes, "Expected synthetic IME fixture size to remain stable");
+    assert_eq!(lines.len(), bench_file.logical_record_count, "Expected all IME logical records parsed");
 
-    // Measure event extraction
-    let start = Instant::now();
-    let events = app_lib::intune::event_tracker::extract_events(&lines, path);
-    let event_ms = start.elapsed().as_millis();
-    eprintln!("Event extract: {}ms ({} events)", event_ms, events.len());
+    let events = app_lib::intune::event_tracker::extract_events(&lines, &path);
+    assert_eq!(events.len(), bench_file.expected_event_count, "Expected one paired content-download event per app");
 
-    // Measure timeline build
-    let start = Instant::now();
     let timeline = app_lib::intune::timeline::build_timeline(events);
-    let timeline_ms = start.elapsed().as_millis();
-    eprintln!("Timeline: {}ms ({} events)", timeline_ms, timeline.len());
+    assert_eq!(timeline.len(), bench_file.expected_timeline_count, "Expected timeline deduplication to preserve one event per app");
 
-    // Measure download stats
-    let start = Instant::now();
-    let downloads =
-        app_lib::intune::download_stats::extract_downloads(&lines, "C:/Logs/AppWorkload.log");
-    let download_ms = start.elapsed().as_millis();
-    eprintln!("Downloads: {}ms ({} stats)", download_ms, downloads.len());
-
-    let total_ms = read_ms + ime_ms + event_ms + timeline_ms + download_ms;
-    eprintln!("Total Intune analysis: {}ms", total_ms);
-
-    // Intune analysis of 100K lines should complete in under 5 seconds (release only)
-    if !is_debug_build() {
-        assert!(
-            total_ms < 5000,
-            "Intune analysis took {}ms, expected <5000ms",
-            total_ms
-        );
-    }
+    let downloads = app_lib::intune::download_stats::extract_downloads(&lines, &path);
+    assert_eq!(downloads.len(), bench_file.expected_download_count, "Expected one download summary per app");
 }

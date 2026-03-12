@@ -4,11 +4,22 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::State;
 
+use crate::intune::models::{EvidenceBundleArtifactCounts, EvidenceBundleMetadata};
 use crate::models::log_entry::ParseResult;
 use crate::parser;
 use crate::state::app_state::{AppState, OpenFile};
+
+const DEFAULT_BUNDLE_PRIMARY_ENTRY_POINTS: &[&str] = &[
+    "evidence/logs",
+    "evidence/registry",
+    "evidence/event-logs",
+    "evidence/exports",
+    "evidence/screenshots",
+    "evidence/command-output",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -96,6 +107,8 @@ pub struct FolderListingResult {
     pub source_kind: LogSourceKind,
     pub source: LogSource,
     pub entries: Vec<FolderEntry>,
+    #[serde(default)]
+    pub bundle_metadata: Option<EvidenceBundleMetadata>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,6 +171,163 @@ fn compare_folder_entries(left: &FolderEntry, right: &FolderEntry) -> Ordering {
                 .then_with(|| left.path.cmp(&right.path))
         }
     }
+}
+
+fn bundle_entry_rank(entry: &FolderEntry) -> usize {
+    match entry.name.to_ascii_lowercase().as_str() {
+        "manifest.json" => 0,
+        "notes.md" => 1,
+        "evidence" => 2,
+        _ => 3,
+    }
+}
+
+fn compare_bundle_folder_entries(left: &FolderEntry, right: &FolderEntry) -> Ordering {
+    bundle_entry_rank(left)
+        .cmp(&bundle_entry_rank(right))
+        .then_with(|| compare_folder_entries(left, right))
+}
+
+fn detect_evidence_bundle_metadata(path: &Path) -> Option<EvidenceBundleMetadata> {
+    let manifest_path = path.join("manifest.json");
+    if !manifest_path.is_file() {
+        return None;
+    }
+
+    let manifest_content = fs::read_to_string(&manifest_path).ok()?;
+    let manifest = serde_json::from_str::<Value>(&manifest_content).ok()?;
+
+    let mut primary_entry_points = resolve_bundle_primary_entry_points(path, &manifest);
+    if primary_entry_points.is_empty() {
+        primary_entry_points = DEFAULT_BUNDLE_PRIMARY_ENTRY_POINTS
+            .iter()
+            .map(|relative| path.join(relative))
+            .collect();
+    }
+
+    Some(EvidenceBundleMetadata {
+        manifest_path: manifest_path.to_string_lossy().to_string(),
+        notes_path: resolve_bundle_hint_path(
+            path,
+            json_string_at(&manifest, &["intakeHints", "notesPath"]).as_deref(),
+        )
+        .or_else(|| {
+            let default_path = path.join("notes.md");
+            default_path.is_file().then_some(default_path)
+        })
+        .map(|value| value.to_string_lossy().to_string()),
+        evidence_root: resolve_bundle_hint_path(
+            path,
+            json_string_at(&manifest, &["intakeHints", "evidenceRoot"]).as_deref(),
+        )
+        .or_else(|| {
+            let default_path = path.join("evidence");
+            default_path.is_dir().then_some(default_path)
+        })
+        .map(|value| value.to_string_lossy().to_string()),
+        primary_entry_points: primary_entry_points
+            .iter()
+            .map(|entry| entry.to_string_lossy().to_string())
+            .collect(),
+        available_primary_entry_points: primary_entry_points
+            .iter()
+            .filter(|entry| entry.exists())
+            .map(|entry| entry.to_string_lossy().to_string())
+            .collect(),
+        bundle_id: json_string_at(&manifest, &["bundle", "bundleId"]),
+        bundle_label: json_string_at(&manifest, &["bundle", "bundleLabel"]),
+        created_utc: json_string_at(&manifest, &["bundle", "createdUtc"]),
+        case_reference: json_string_at(&manifest, &["bundle", "caseReference"]),
+        summary: json_string_at(&manifest, &["bundle", "summary"]),
+        collector_profile: json_string_at(&manifest, &["collection", "collectorProfile"]),
+        collector_version: json_string_at(&manifest, &["collection", "collectorVersion"]),
+        collected_utc: json_string_at(&manifest, &["collection", "collectedUtc"]),
+        device_name: json_string_at(&manifest, &["bundle", "device", "deviceName"]),
+        primary_user: json_string_at(&manifest, &["bundle", "device", "primaryUser"]),
+        platform: json_string_at(&manifest, &["bundle", "device", "platform"]),
+        os_version: json_string_at(&manifest, &["bundle", "device", "osVersion"]),
+        tenant: json_string_at(&manifest, &["bundle", "device", "tenant"]),
+        artifact_counts: Some(EvidenceBundleArtifactCounts {
+            collected: json_u64_at(
+                &manifest,
+                &["collection", "results", "artifactCounts", "collected"],
+            )?,
+            missing: json_u64_at(
+                &manifest,
+                &["collection", "results", "artifactCounts", "missing"],
+            )?,
+            failed: json_u64_at(
+                &manifest,
+                &["collection", "results", "artifactCounts", "failed"],
+            )?,
+            skipped: json_u64_at(
+                &manifest,
+                &["collection", "results", "artifactCounts", "skipped"],
+            )?,
+        }),
+    })
+}
+
+fn resolve_bundle_primary_entry_points(bundle_root: &Path, manifest: &Value) -> Vec<PathBuf> {
+    let manifest_entry_points = json_string_array_at(manifest, &["intakeHints", "primaryEntryPoints"]);
+    let entry_points = if manifest_entry_points.is_empty() {
+        DEFAULT_BUNDLE_PRIMARY_ENTRY_POINTS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    } else {
+        manifest_entry_points
+    };
+
+    entry_points
+        .iter()
+        .filter_map(|entry| resolve_bundle_hint_path(bundle_root, Some(entry.as_str())))
+        .collect()
+}
+
+fn resolve_bundle_hint_path(bundle_root: &Path, raw_path: Option<&str>) -> Option<PathBuf> {
+    let raw_path = raw_path?.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(bundle_root.join(path))
+    }
+}
+
+fn json_value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
+}
+
+fn json_string_at(value: &Value, path: &[&str]) -> Option<String> {
+    json_value_at(value, path)
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+}
+
+fn json_u64_at(value: &Value, path: &[&str]) -> Option<u64> {
+    json_value_at(value, path).and_then(Value::as_u64)
+}
+
+fn json_string_array_at(value: &Value, path: &[&str]) -> Vec<String> {
+    json_value_at(value, path)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| value.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// List top-level entries for a folder source.
@@ -225,7 +395,12 @@ pub fn list_log_folder(path: String) -> Result<FolderListingResult, String> {
         });
     }
 
-    entries.sort_by(compare_folder_entries);
+    let bundle_metadata = detect_evidence_bundle_metadata(&requested_path);
+    if bundle_metadata.is_some() {
+        entries.sort_by(compare_bundle_folder_entries);
+    } else {
+        entries.sort_by(compare_folder_entries);
+    }
 
     eprintln!(
         "event=list_log_folder_complete path=\"{}\" entry_count={}",
@@ -239,6 +414,7 @@ pub fn list_log_folder(path: String) -> Result<FolderListingResult, String> {
             path: normalize_path_string(&requested_path),
         },
         entries,
+        bundle_metadata,
     })
 }
 
@@ -490,4 +666,150 @@ pub fn get_known_log_sources() -> Result<Vec<KnownSourceMetadata>, String> {
     eprintln!("event=get_known_log_sources count={}", sources.len());
 
     Ok(sources)
+}
+
+#[cfg(test)]
+mod tests {
+        use super::list_log_folder;
+        use std::fs;
+        use std::path::PathBuf;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        #[test]
+        fn list_log_folder_marks_evidence_bundle_and_exposes_primary_entry_points() {
+                let bundle_dir = create_temp_dir("file-ops-bundle");
+                fs::create_dir_all(bundle_dir.join("evidence").join("logs")).expect("create logs dir");
+                fs::create_dir_all(bundle_dir.join("evidence").join("registry"))
+                        .expect("create registry dir");
+                fs::write(bundle_dir.join("notes.md"), "notes").expect("write notes");
+                fs::write(bundle_dir.join("manifest.json"), sample_bundle_manifest()).expect("write manifest");
+
+                let result = list_log_folder(bundle_dir.to_string_lossy().to_string()).expect("list folder");
+                let bundle_metadata = result.bundle_metadata.expect("bundle metadata");
+
+                assert_eq!(bundle_metadata.bundle_id.as_deref(), Some("CMTRACE-123"));
+                assert_eq!(result.entries.first().map(|entry| entry.name.as_str()), Some("manifest.json"));
+                assert!(bundle_metadata
+                        .available_primary_entry_points
+                        .iter()
+                        .any(|path| path.ends_with("evidence\\logs") || path.ends_with("evidence/logs")));
+                assert!(bundle_metadata
+                        .available_primary_entry_points
+                        .iter()
+                        .any(|path| path.ends_with("evidence\\registry") || path.ends_with("evidence/registry")));
+
+                fs::remove_dir_all(&bundle_dir).expect("remove temp bundle dir");
+        }
+
+    #[test]
+    fn list_log_folder_bundle_metadata_filters_missing_manifest_entry_points() {
+        let bundle_dir = create_temp_dir("file-ops-bundle-missing");
+        fs::create_dir_all(bundle_dir.join("evidence").join("logs")).expect("create logs dir");
+        fs::write(bundle_dir.join("manifest.json"), sample_bundle_manifest_with_missing_entry())
+            .expect("write manifest");
+
+        let result = list_log_folder(bundle_dir.to_string_lossy().to_string()).expect("list folder");
+        let bundle_metadata = result.bundle_metadata.expect("bundle metadata");
+
+        assert_eq!(bundle_metadata.primary_entry_points.len(), 2);
+        assert!(bundle_metadata
+            .primary_entry_points
+            .iter()
+            .any(|path| path.ends_with("evidence\\logs") || path.ends_with("evidence/logs")));
+        assert!(bundle_metadata
+            .primary_entry_points
+            .iter()
+            .any(|path| path.ends_with("evidence\\missing") || path.ends_with("evidence/missing")));
+        assert_eq!(bundle_metadata.available_primary_entry_points.len(), 1);
+        assert!(bundle_metadata
+            .available_primary_entry_points
+            .iter()
+            .all(|path| !path.ends_with("evidence\\missing") && !path.ends_with("evidence/missing")));
+
+        fs::remove_dir_all(&bundle_dir).expect("remove temp bundle dir");
+    }
+
+        fn create_temp_dir(prefix: &str) -> PathBuf {
+                let unique = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system time before unix epoch")
+                        .as_nanos();
+                let path = std::env::temp_dir().join(format!("{}-{}", prefix, unique));
+                fs::create_dir_all(&path).expect("create temp dir");
+                path
+        }
+
+        fn sample_bundle_manifest() -> &'static str {
+                r#"{
+    "bundle": {
+        "bundleId": "CMTRACE-123",
+        "bundleLabel": "intune-endpoint-evidence",
+        "createdUtc": "2026-03-12T16:00:54Z",
+        "caseReference": "case-123",
+        "summary": "Curated endpoint evidence bundle.",
+        "device": {
+            "deviceName": "GELL-VM-5879648",
+            "primaryUser": "AzureAD\\AdamGell",
+            "platform": "Windows",
+            "osVersion": "Windows 11",
+            "tenant": "CDWWorkspaceLab"
+        }
+    },
+    "collection": {
+        "collectorProfile": "intune-windows-endpoint-v1",
+        "collectorVersion": "1.1.0",
+        "collectedUtc": "2026-03-12T16:00:54Z",
+        "results": {
+            "artifactCounts": {
+                "collected": 55,
+                "missing": 7,
+                "failed": 2,
+                "skipped": 0
+            }
+        }
+    },
+    "intakeHints": {
+        "notesPath": "notes.md",
+        "evidenceRoot": "evidence",
+        "primaryEntryPoints": [
+            "evidence/logs",
+            "evidence/registry",
+            "evidence/event-logs",
+            "evidence/exports",
+            "evidence/screenshots",
+            "evidence/command-output"
+        ]
+    }
+}"#
+        }
+
+        fn sample_bundle_manifest_with_missing_entry() -> &'static str {
+                r#"{
+    "bundle": {
+        "bundleId": "CMTRACE-456",
+        "bundleLabel": "intune-endpoint-evidence",
+        "createdUtc": "2026-03-12T16:00:54Z",
+        "device": {
+            "deviceName": "GELL-VM-5879648",
+            "platform": "Windows"
+        }
+    },
+    "collection": {
+        "results": {
+            "artifactCounts": {
+                "collected": 1,
+                "missing": 1,
+                "failed": 0,
+                "skipped": 0
+            }
+        }
+    },
+    "intakeHints": {
+        "primaryEntryPoints": [
+            "evidence/logs",
+            "evidence/missing"
+        ]
+    }
+}"#
+        }
 }

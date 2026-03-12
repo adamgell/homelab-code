@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use serde_json::Value;
 use tauri::async_runtime;
 
 use crate::error_db::lookup::lookup_error_code;
@@ -10,10 +11,11 @@ use crate::intune::download_stats;
 use crate::intune::event_tracker;
 use crate::intune::ime_parser;
 use crate::intune::models::{
-    DownloadStat, IntuneAnalysisResult, IntuneDiagnosticInsight, IntuneDiagnosticSeverity,
-    IntuneDiagnosticsConfidence, IntuneDiagnosticsConfidenceLevel, IntuneDiagnosticsCoverage,
-    IntuneDiagnosticsFileCoverage, IntuneDominantSource, IntuneEvent, IntuneEventType,
-    IntuneRepeatedFailureGroup, IntuneStatus, IntuneSummary, IntuneTimestampBounds,
+    DownloadStat, EvidenceBundleArtifactCounts, EvidenceBundleMetadata, IntuneAnalysisResult,
+    IntuneDiagnosticInsight, IntuneDiagnosticSeverity, IntuneDiagnosticsConfidence,
+    IntuneDiagnosticsConfidenceLevel, IntuneDiagnosticsCoverage, IntuneDiagnosticsFileCoverage,
+    IntuneDominantSource, IntuneEvent, IntuneEventType, IntuneRepeatedFailureGroup,
+    IntuneStatus, IntuneSummary, IntuneTimestampBounds,
 };
 use crate::intune::timeline;
 
@@ -29,6 +31,15 @@ const IME_LOG_PATTERNS: &[&str] = &[
     "sensor",
     "win32appinventory",
     "imeui",
+];
+
+const DEFAULT_BUNDLE_PRIMARY_ENTRY_POINTS: &[&str] = &[
+    "evidence/logs",
+    "evidence/registry",
+    "evidence/event-logs",
+    "evidence/exports",
+    "evidence/screenshots",
+    "evidence/command-output",
 ];
 
 /// Analyze Intune Management Extension logs and return structured results.
@@ -48,7 +59,9 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
     eprintln!("event=intune_analysis_start path=\"{}\"", path);
 
     let input_path = Path::new(&path);
-    let source_paths = collect_input_paths(input_path)?;
+    let resolved_input = resolve_intune_input(input_path)?;
+    let source_paths = resolved_input.source_paths;
+    let evidence_bundle = resolved_input.evidence_bundle;
     eprintln!(
         "event=intune_analysis_sources_resolved path=\"{}\" source_count={}",
         path,
@@ -125,11 +138,7 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
     }
 
     if all_events.is_empty() {
-        let total_downloads = all_downloads.len() as u32;
-        let successful_downloads = all_downloads.iter().filter(|download| download.success).count()
-            as u32;
-        let failed_downloads = all_downloads.iter().filter(|download| !download.success).count()
-            as u32;
+        let download_summary = summarize_download_signals(&[], &all_downloads);
         let summary = IntuneSummary {
             total_events: 0,
             win32_apps: 0,
@@ -141,9 +150,9 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
             in_progress: 0,
             pending: 0,
             timed_out: 0,
-            total_downloads,
-            successful_downloads,
-            failed_downloads,
+            total_downloads: download_summary.total_downloads,
+            successful_downloads: download_summary.successful_downloads,
+            failed_downloads: download_summary.failed_downloads,
             failed_scripts: 0,
             log_time_span: None,
         };
@@ -176,6 +185,7 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
             diagnostics_coverage,
             diagnostics_confidence,
             repeated_failures,
+            evidence_bundle,
         });
     }
 
@@ -221,7 +231,14 @@ fn analyze_intune_logs_blocking(path: String) -> Result<IntuneAnalysisResult, St
         diagnostics_coverage,
         diagnostics_confidence,
         repeated_failures,
+        evidence_bundle,
     })
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedIntuneInput {
+    source_paths: Vec<PathBuf>,
+    evidence_bundle: Option<EvidenceBundleMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -260,6 +277,26 @@ struct RepeatedFailureAccumulator {
     earliest: Option<TimestampCandidate>,
     latest: Option<TimestampCandidate>,
     reason_display: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadSignalState {
+    InProgress,
+    Success,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+struct DownloadSignalAccumulator {
+    state: DownloadSignalState,
+    timestamp: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DownloadSignalSummary {
+    total_downloads: u32,
+    successful_downloads: u32,
+    failed_downloads: u32,
 }
 
 fn finalize_coverage(
@@ -945,12 +982,14 @@ fn describe_directory_read_error(path: &Path, error: &std::io::Error) -> String 
     }
 }
 
-/// Resolve a single file or a directory of Intune logs into a deterministic file list.
-fn collect_input_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
+fn resolve_intune_input(path: &Path) -> Result<ResolvedIntuneInput, String> {
     let metadata = fs::metadata(path).map_err(|error| describe_path_access_error(path, &error))?;
 
     if metadata.is_file() {
-        return Ok(vec![path.to_path_buf()]);
+        return Ok(ResolvedIntuneInput {
+            source_paths: vec![path.to_path_buf()],
+            evidence_bundle: None,
+        });
     }
 
     if !metadata.is_dir() {
@@ -960,6 +999,23 @@ fn collect_input_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
         ));
     }
 
+    if let Some(bundle_input) = resolve_evidence_bundle_input(path)? {
+        return Ok(bundle_input);
+    }
+
+    Ok(ResolvedIntuneInput {
+        source_paths: collect_directory_log_paths(path)?,
+        evidence_bundle: None,
+    })
+}
+
+/// Resolve a single file or a directory of Intune logs into a deterministic file list.
+#[cfg(test)]
+fn collect_input_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
+    Ok(resolve_intune_input(path)?.source_paths)
+}
+
+fn collect_directory_log_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     let entries = fs::read_dir(path).map_err(|error| describe_directory_read_error(path, &error))?;
 
     let mut files: Vec<PathBuf> = entries
@@ -994,6 +1050,285 @@ fn collect_input_paths(path: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(ime_files)
 }
 
+fn resolve_evidence_bundle_input(path: &Path) -> Result<Option<ResolvedIntuneInput>, String> {
+    let manifest_path = path.join("manifest.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+
+    let manifest = match fs::read_to_string(&manifest_path) {
+        Ok(content) => match serde_json::from_str::<Value>(&content) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "event=intune_bundle_manifest_parse_failed path=\"{}\" error=\"{}\"",
+                    manifest_path.display(),
+                    error
+                );
+                return Ok(None);
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "event=intune_bundle_manifest_read_failed path=\"{}\" error=\"{}\"",
+                manifest_path.display(),
+                error
+            );
+            return Ok(None);
+        }
+    };
+
+    let evidence_bundle = build_evidence_bundle_metadata(path, &manifest);
+    let source_paths = collect_bundle_log_paths(path, &manifest, &evidence_bundle)?;
+
+    eprintln!(
+        "event=intune_bundle_resolved bundle_id=\"{}\" path=\"{}\" source_count={} available_primary_entry_points={}",
+        evidence_bundle.bundle_id.as_deref().unwrap_or("unknown"),
+        path.display(),
+        source_paths.len(),
+        evidence_bundle.available_primary_entry_points.len()
+    );
+
+    Ok(Some(ResolvedIntuneInput {
+        source_paths,
+        evidence_bundle: Some(evidence_bundle),
+    }))
+}
+
+fn build_evidence_bundle_metadata(bundle_root: &Path, manifest: &Value) -> EvidenceBundleMetadata {
+    let manifest_path = bundle_root.join("manifest.json");
+    let notes_path = resolve_bundle_hint_path(
+        bundle_root,
+        json_string_at(manifest, &["intakeHints", "notesPath"]).as_deref(),
+    )
+    .or_else(|| {
+        let default_path = bundle_root.join("notes.md");
+        default_path.is_file().then_some(default_path)
+    });
+    let evidence_root = resolve_bundle_hint_path(
+        bundle_root,
+        json_string_at(manifest, &["intakeHints", "evidenceRoot"]).as_deref(),
+    )
+    .or_else(|| {
+        let default_path = bundle_root.join("evidence");
+        default_path.is_dir().then_some(default_path)
+    });
+
+    let mut primary_entry_points = resolve_bundle_primary_entry_points(bundle_root, manifest);
+    if primary_entry_points.is_empty() {
+        primary_entry_points = DEFAULT_BUNDLE_PRIMARY_ENTRY_POINTS
+            .iter()
+            .map(|relative| bundle_root.join(relative))
+            .collect();
+    }
+
+    let available_primary_entry_points = primary_entry_points
+        .iter()
+        .filter(|entry| entry.exists())
+        .map(|entry| entry.to_string_lossy().to_string())
+        .collect();
+
+    EvidenceBundleMetadata {
+        manifest_path: manifest_path.to_string_lossy().to_string(),
+        notes_path: notes_path.map(|value| value.to_string_lossy().to_string()),
+        evidence_root: evidence_root.map(|value| value.to_string_lossy().to_string()),
+        primary_entry_points: primary_entry_points
+            .iter()
+            .map(|entry| entry.to_string_lossy().to_string())
+            .collect(),
+        available_primary_entry_points,
+        bundle_id: json_string_at(manifest, &["bundle", "bundleId"]),
+        bundle_label: json_string_at(manifest, &["bundle", "bundleLabel"]),
+        created_utc: json_string_at(manifest, &["bundle", "createdUtc"]),
+        case_reference: json_string_at(manifest, &["bundle", "caseReference"]),
+        summary: json_string_at(manifest, &["bundle", "summary"]),
+        collector_profile: json_string_at(manifest, &["collection", "collectorProfile"]),
+        collector_version: json_string_at(manifest, &["collection", "collectorVersion"]),
+        collected_utc: json_string_at(manifest, &["collection", "collectedUtc"]),
+        device_name: json_string_at(manifest, &["bundle", "device", "deviceName"]),
+        primary_user: json_string_at(manifest, &["bundle", "device", "primaryUser"]),
+        platform: json_string_at(manifest, &["bundle", "device", "platform"]),
+        os_version: json_string_at(manifest, &["bundle", "device", "osVersion"]),
+        tenant: json_string_at(manifest, &["bundle", "device", "tenant"]),
+        artifact_counts: build_bundle_artifact_counts(manifest),
+    }
+}
+
+fn build_bundle_artifact_counts(manifest: &Value) -> Option<EvidenceBundleArtifactCounts> {
+    Some(EvidenceBundleArtifactCounts {
+        collected: json_u64_at(
+            manifest,
+            &["collection", "results", "artifactCounts", "collected"],
+        )?,
+        missing: json_u64_at(
+            manifest,
+            &["collection", "results", "artifactCounts", "missing"],
+        )?,
+        failed: json_u64_at(
+            manifest,
+            &["collection", "results", "artifactCounts", "failed"],
+        )?,
+        skipped: json_u64_at(
+            manifest,
+            &["collection", "results", "artifactCounts", "skipped"],
+        )?,
+    })
+}
+
+fn collect_bundle_log_paths(
+    bundle_root: &Path,
+    manifest: &Value,
+    evidence_bundle: &EvidenceBundleMetadata,
+) -> Result<Vec<PathBuf>, String> {
+    let primary_entry_points: Vec<PathBuf> = evidence_bundle
+        .primary_entry_points
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+    let mut seen = HashSet::new();
+    let mut manifest_candidates = Vec::new();
+
+    if let Some(artifacts) = manifest.get("artifacts").and_then(Value::as_array) {
+        for artifact in artifacts {
+            let Some(relative_path) = artifact.get("relativePath").and_then(Value::as_str) else {
+                continue;
+            };
+
+            let candidate_path = bundle_root.join(relative_path);
+            if !candidate_path.is_file() || !is_log_file(&candidate_path) {
+                continue;
+            }
+
+            if !primary_entry_points.is_empty()
+                && !primary_entry_points
+                    .iter()
+                    .any(|entry_point| candidate_path.starts_with(entry_point))
+            {
+                continue;
+            }
+
+            let key = candidate_path.to_string_lossy().to_string();
+            if seen.insert(key) {
+                manifest_candidates.push(candidate_path);
+            }
+        }
+    }
+
+    let mut selected = prioritize_ime_log_paths(manifest_candidates);
+    if !selected.is_empty() {
+        return Ok(selected);
+    }
+
+    let mut scanned_candidates = Vec::new();
+    for entry_point in primary_entry_points {
+        if !entry_point.is_dir() {
+            continue;
+        }
+
+        let read_dir = fs::read_dir(&entry_point)
+            .map_err(|error| describe_directory_read_error(&entry_point, &error))?;
+
+        let mut entries: Vec<PathBuf> = read_dir
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && is_log_file(path))
+            .collect();
+
+        entries.sort_by_key(|candidate| {
+            candidate
+                .file_name()
+                .map(|value| value.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default()
+        });
+
+        for candidate in entries {
+            let key = candidate.to_string_lossy().to_string();
+            if seen.insert(key) {
+                scanned_candidates.push(candidate);
+            }
+        }
+    }
+
+    selected = prioritize_ime_log_paths(scanned_candidates);
+    Ok(selected)
+}
+
+fn prioritize_ime_log_paths(candidates: Vec<PathBuf>) -> Vec<PathBuf> {
+    let ime_files: Vec<PathBuf> = candidates
+        .iter()
+        .filter(|path| is_ime_related_log_file(path))
+        .cloned()
+        .collect();
+
+    if !ime_files.is_empty() {
+        return ime_files;
+    }
+
+    candidates
+}
+
+fn resolve_bundle_primary_entry_points(bundle_root: &Path, manifest: &Value) -> Vec<PathBuf> {
+    let manifest_entry_points = json_string_array_at(manifest, &["intakeHints", "primaryEntryPoints"]);
+    let entry_points = if manifest_entry_points.is_empty() {
+        DEFAULT_BUNDLE_PRIMARY_ENTRY_POINTS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    } else {
+        manifest_entry_points
+    };
+
+    entry_points
+        .iter()
+        .filter_map(|entry| resolve_bundle_hint_path(bundle_root, Some(entry.as_str())))
+        .collect()
+}
+
+fn resolve_bundle_hint_path(bundle_root: &Path, raw_path: Option<&str>) -> Option<PathBuf> {
+    let raw_path = raw_path?.trim();
+    if raw_path.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(raw_path);
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(bundle_root.join(path))
+    }
+}
+
+fn json_value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    Some(current)
+}
+
+fn json_string_at(value: &Value, path: &[&str]) -> Option<String> {
+    json_value_at(value, path)
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+}
+
+fn json_u64_at(value: &Value, path: &[&str]) -> Option<u64> {
+    json_value_at(value, path).and_then(Value::as_u64)
+}
+
+fn json_string_array_at(value: &Value, path: &[&str]) -> Vec<String> {
+    json_value_at(value, path)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|value| value.to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn is_log_file(path: &Path) -> bool {
     path.extension()
         .map(|ext| ext.to_string_lossy().eq_ignore_ascii_case("log"))
@@ -1018,6 +1353,10 @@ fn build_summary(
     events: &[IntuneEvent],
     downloads: &[DownloadStat],
 ) -> IntuneSummary {
+    let summary_events: Vec<&IntuneEvent> = events
+        .iter()
+        .filter(|event| is_summary_signal_event(event))
+        .collect();
     let mut win32_apps = 0u32;
     let mut winget_apps = 0u32;
     let mut scripts = 0u32;
@@ -1029,7 +1368,7 @@ fn build_summary(
     let mut timed_out = 0u32;
     let mut failed_scripts = 0u32;
 
-    for event in events {
+    for event in &summary_events {
         match event.event_type {
             IntuneEventType::Win32App => win32_apps += 1,
             IntuneEventType::WinGetApp => winget_apps += 1,
@@ -1059,12 +1398,11 @@ fn build_summary(
         }
     }
 
+    let download_summary = summarize_download_signals(events, downloads);
     let log_time_span = timeline::calculate_time_span(events);
-    let successful_downloads = downloads.iter().filter(|download| download.success).count() as u32;
-    let failed_downloads = downloads.iter().filter(|download| !download.success).count() as u32;
 
     IntuneSummary {
-        total_events: events.len() as u32,
+        total_events: summary_events.len() as u32,
         win32_apps,
         winget_apps,
         scripts,
@@ -1074,11 +1412,188 @@ fn build_summary(
         in_progress,
         pending,
         timed_out,
-        total_downloads: downloads.len() as u32,
-        successful_downloads,
-        failed_downloads,
+        total_downloads: download_summary.total_downloads,
+        successful_downloads: download_summary.successful_downloads,
+        failed_downloads: download_summary.failed_downloads,
         failed_scripts,
         log_time_span,
+    }
+}
+
+fn is_summary_signal_event(event: &IntuneEvent) -> bool {
+    match event.event_type {
+        IntuneEventType::Win32App
+        | IntuneEventType::WinGetApp
+        | IntuneEventType::PowerShellScript
+        | IntuneEventType::Remediation
+        | IntuneEventType::PolicyEvaluation
+        | IntuneEventType::ContentDownload
+        | IntuneEventType::Esp
+        | IntuneEventType::SyncSession => true,
+        IntuneEventType::Other => matches!(
+            event.status,
+            IntuneStatus::Failed | IntuneStatus::Timeout | IntuneStatus::Pending | IntuneStatus::InProgress
+        ),
+    }
+}
+
+fn summarize_download_signals(
+    events: &[IntuneEvent],
+    downloads: &[DownloadStat],
+) -> DownloadSignalSummary {
+    let mut signals: HashMap<String, DownloadSignalAccumulator> = HashMap::new();
+
+    for event in events {
+        let Some(key) = download_signal_key_for_event(event) else {
+            continue;
+        };
+        let Some(state) = download_signal_state_for_event(event) else {
+            continue;
+        };
+
+        upsert_download_signal(
+            &mut signals,
+            key,
+            state,
+            event.start_time.as_deref().or(event.end_time.as_deref()),
+        );
+    }
+
+    for download in downloads {
+        let state = if download.success {
+            DownloadSignalState::Success
+        } else {
+            DownloadSignalState::Failed
+        };
+        upsert_download_signal(
+            &mut signals,
+            download_signal_key_for_stat(download),
+            state,
+            download.timestamp.as_deref(),
+        );
+    }
+
+    DownloadSignalSummary {
+        total_downloads: signals.len() as u32,
+        successful_downloads: signals
+            .values()
+            .filter(|signal| signal.state == DownloadSignalState::Success)
+            .count() as u32,
+        failed_downloads: signals
+            .values()
+            .filter(|signal| signal.state == DownloadSignalState::Failed)
+            .count() as u32,
+    }
+}
+
+fn download_signal_key_for_event(event: &IntuneEvent) -> Option<String> {
+    if event.event_type != IntuneEventType::ContentDownload {
+        return None;
+    }
+
+    if let Some(guid) = &event.guid {
+        return Some(format!("guid:{}", guid.to_ascii_lowercase()));
+    }
+
+    let normalized_name = normalize_group_label(&event.name);
+    if !normalized_name.is_empty() {
+        return Some(format!(
+            "name:{}|family:{}",
+            normalized_name,
+            timeline::normalized_source_identity(&event.source_file)
+        ));
+    }
+
+    let normalized_detail = normalize_group_label(&event.detail);
+    if !normalized_detail.is_empty() {
+        return Some(format!(
+            "detail:{}|family:{}",
+            normalized_detail,
+            timeline::normalized_source_identity(&event.source_file)
+        ));
+    }
+
+    None
+}
+
+fn download_signal_key_for_stat(download: &DownloadStat) -> String {
+    if !download.content_id.trim().is_empty() && !download.content_id.eq_ignore_ascii_case("unknown") {
+        return format!("guid:{}", download.content_id.to_ascii_lowercase());
+    }
+
+    let normalized_name = normalize_group_label(&download.name);
+    if !normalized_name.is_empty() {
+        return format!("name:{}", normalized_name);
+    }
+
+    format!(
+        "timestamp:{}|result:{}",
+        download.timestamp.as_deref().unwrap_or("unknown"),
+        if download.success { "success" } else { "failed" }
+    )
+}
+
+fn download_signal_state_for_event(event: &IntuneEvent) -> Option<DownloadSignalState> {
+    match event.status {
+        IntuneStatus::Failed | IntuneStatus::Timeout => Some(DownloadSignalState::Failed),
+        IntuneStatus::Success => Some(DownloadSignalState::Success),
+        IntuneStatus::InProgress | IntuneStatus::Pending => Some(DownloadSignalState::InProgress),
+        IntuneStatus::Unknown => None,
+    }
+}
+
+fn upsert_download_signal(
+    signals: &mut HashMap<String, DownloadSignalAccumulator>,
+    key: String,
+    state: DownloadSignalState,
+    timestamp: Option<&str>,
+) {
+    let candidate_timestamp = timestamp.map(|value| value.to_string());
+    let should_replace = match signals.get(&key) {
+        Some(existing) => should_replace_download_signal(existing, state, candidate_timestamp.as_deref()),
+        None => true,
+    };
+
+    if should_replace {
+        signals.insert(
+            key,
+            DownloadSignalAccumulator {
+                state,
+                timestamp: candidate_timestamp,
+            },
+        );
+    }
+}
+
+fn should_replace_download_signal(
+    existing: &DownloadSignalAccumulator,
+    candidate_state: DownloadSignalState,
+    candidate_timestamp: Option<&str>,
+) -> bool {
+    match compare_optional_timestamps(candidate_timestamp, existing.timestamp.as_deref()) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => download_signal_rank(candidate_state) >= download_signal_rank(existing.state),
+    }
+}
+
+fn compare_optional_timestamps(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => match (timeline::parse_timestamp(left), timeline::parse_timestamp(right)) {
+            (Some(left_time), Some(right_time)) => left_time.cmp(&right_time).then_with(|| left.cmp(right)),
+            _ => left.cmp(right),
+        },
+        (Some(_), None) => std::cmp::Ordering::Greater,
+        (None, Some(_)) => std::cmp::Ordering::Less,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn download_signal_rank(state: DownloadSignalState) -> u8 {
+    match state {
+        DownloadSignalState::InProgress => 1,
+        DownloadSignalState::Success => 2,
+        DownloadSignalState::Failed => 3,
     }
 }
 
@@ -1882,10 +2397,16 @@ fn repeated_failure_groups(
     let mut counts: HashMap<String, (String, usize)> = HashMap::new();
 
     for event in events {
+        let source_identity = timeline::normalized_source_identity(&event.source_file);
         let key = if let Some(guid) = &event.guid {
-            format!("{}|{:?}|{}", event.source_file, event.event_type, guid)
+            format!("{}|{:?}|{}", source_identity, event.event_type, guid)
         } else {
-            format!("{}|{:?}|{}", event.source_file, event.event_type, normalize_group_label(&event.name))
+            format!(
+                "{}|{:?}|{}",
+                source_identity,
+                event.event_type,
+                normalize_group_label(&event.name)
+            )
         };
 
         let entry = counts.entry(key).or_insert_with(|| (event.name.clone(), 0));
@@ -1961,7 +2482,8 @@ fn top_event_labels(events: &[&IntuneEvent], limit: usize) -> Vec<String> {
 mod tests {
     use super::{
         build_diagnostics, build_diagnostics_confidence, build_repeated_failures,
-        build_timestamp_bounds, collect_input_paths, finalize_coverage, CoverageAccumulator,
+        build_summary, build_timestamp_bounds, collect_input_paths, finalize_coverage,
+        resolve_intune_input, CoverageAccumulator,
     };
     use crate::intune::models::{
         DownloadStat, IntuneDiagnosticSeverity, IntuneDiagnosticsConfidenceLevel,
@@ -2028,6 +2550,111 @@ mod tests {
 
         fs::remove_dir_all(&test_dir).expect("remove temp dir");
     }
+
+        #[test]
+        fn collect_input_paths_reads_bundle_logs_from_manifest_guided_entry_points() {
+                let bundle_dir = create_temp_dir("intune-bundle");
+                let logs_dir = bundle_dir.join("evidence").join("logs");
+                fs::create_dir_all(&logs_dir).expect("create logs dir");
+                fs::write(logs_dir.join("IntuneManagementExtension.log"), "primary")
+                        .expect("write primary log");
+                fs::write(logs_dir.join("AppWorkload.log"), "sidecar").expect("write sidecar");
+                fs::write(bundle_dir.join("manifest.json"), sample_bundle_manifest()).expect("write manifest");
+
+                let collected = collect_input_paths(&bundle_dir).expect("collect input paths");
+                let file_names: Vec<String> = collected
+                        .iter()
+                        .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+                        .collect();
+
+                assert_eq!(
+                        file_names,
+                        vec![
+                                "IntuneManagementExtension.log".to_string(),
+                                "AppWorkload.log".to_string(),
+                        ]
+                );
+
+                fs::remove_dir_all(&bundle_dir).expect("remove temp bundle dir");
+        }
+
+        #[test]
+        fn resolve_intune_input_retains_bundle_metadata_and_allows_sparse_bundle() {
+                let bundle_dir = create_temp_dir("intune-sparse-bundle");
+                fs::create_dir_all(bundle_dir.join("evidence").join("logs")).expect("create sparse logs dir");
+                fs::write(bundle_dir.join("notes.md"), "notes").expect("write notes");
+                fs::write(bundle_dir.join("manifest.json"), sample_bundle_manifest()).expect("write manifest");
+
+                let resolved = resolve_intune_input(&bundle_dir).expect("resolve bundle input");
+
+                assert!(resolved.source_paths.is_empty());
+                let bundle = resolved.evidence_bundle.expect("bundle metadata");
+                assert_eq!(bundle.bundle_id.as_deref(), Some("CMTRACE-123"));
+                assert_eq!(bundle.device_name.as_deref(), Some("GELL-VM-5879648"));
+                assert_eq!(bundle.available_primary_entry_points.len(), 1);
+                assert!(bundle
+                        .available_primary_entry_points
+                        .iter()
+                        .any(|path| path.ends_with("evidence\\logs") || path.ends_with("evidence/logs")));
+
+                fs::remove_dir_all(&bundle_dir).expect("remove temp sparse bundle dir");
+        }
+
+        fn sample_bundle_manifest() -> &'static str {
+                r#"{
+    "bundle": {
+        "bundleId": "CMTRACE-123",
+        "bundleLabel": "intune-endpoint-evidence",
+        "createdUtc": "2026-03-12T16:00:54Z",
+        "caseReference": "case-123",
+        "summary": "Curated endpoint evidence bundle.",
+        "device": {
+            "deviceName": "GELL-VM-5879648",
+            "primaryUser": "AzureAD\\AdamGell",
+            "platform": "Windows",
+            "osVersion": "Windows 11",
+            "tenant": "CDWWorkspaceLab"
+        }
+    },
+    "collection": {
+        "collectorProfile": "intune-windows-endpoint-v1",
+        "collectorVersion": "1.1.0",
+        "collectedUtc": "2026-03-12T16:00:54Z",
+        "results": {
+            "artifactCounts": {
+                "collected": 55,
+                "missing": 7,
+                "failed": 2,
+                "skipped": 0
+            }
+        }
+    },
+    "intakeHints": {
+        "manifestPath": "manifest.json",
+        "notesPath": "notes.md",
+        "evidenceRoot": "evidence",
+        "primaryEntryPoints": [
+            "evidence/logs",
+            "evidence/registry",
+            "evidence/event-logs",
+            "evidence/exports",
+            "evidence/screenshots",
+            "evidence/command-output"
+        ]
+    },
+    "artifacts": [
+        {
+            "relativePath": "evidence/logs/IntuneManagementExtension.log"
+        },
+        {
+            "relativePath": "evidence/logs/AppWorkload.log"
+        },
+        {
+            "relativePath": "evidence/command-output/mdmdiagnosticstool.txt"
+        }
+    ]
+}"#
+        }
 
     fn create_temp_dir(prefix: &str) -> PathBuf {
         let unique = SystemTime::now()
@@ -2348,5 +2975,134 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("AppWorkload evidence was not available")));
+    }
+
+    #[test]
+    fn build_summary_uses_content_download_events_when_stats_are_sparse() {
+        let events = vec![IntuneEvent {
+            id: 1,
+            event_type: IntuneEventType::ContentDownload,
+            name: "AppWorkload Download Stall (abcd1234...)".to_string(),
+            guid: Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string()),
+            status: IntuneStatus::Timeout,
+            start_time: Some("01-15-2024 10:00:00.000".to_string()),
+            end_time: None,
+            duration_secs: None,
+            error_code: None,
+            detail: "Content download stalled with no progress".to_string(),
+            source_file: "C:/Logs/AppWorkload.log".to_string(),
+            line_number: 15,
+        }];
+
+        let summary = build_summary(&events, &[]);
+
+        assert_eq!(summary.total_events, 1);
+        assert_eq!(summary.total_downloads, 1);
+        assert_eq!(summary.failed_downloads, 1);
+        assert_eq!(summary.successful_downloads, 0);
+    }
+
+    #[test]
+    fn build_summary_ignores_low_signal_auxiliary_successes_in_headline_counts() {
+        let events = vec![
+            IntuneEvent {
+                id: 1,
+                event_type: IntuneEventType::Other,
+                name: "ClientHealth Heartbeat Sent".to_string(),
+                guid: None,
+                status: IntuneStatus::Success,
+                start_time: Some("01-15-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "The client health report was sent successfully. Done.".to_string(),
+                source_file: "C:/Logs/ClientHealth.log".to_string(),
+                line_number: 10,
+            },
+            IntuneEvent {
+                id: 2,
+                event_type: IntuneEventType::Other,
+                name: "Win32AppInventory Delta (+2 ~0 -2)".to_string(),
+                guid: None,
+                status: IntuneStatus::Success,
+                start_time: Some("01-15-2024 10:01:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "Computing delta inventory...Done. Add count = 2, Modify count = 0, Delete count = 2".to_string(),
+                source_file: "C:/Logs/Win32AppInventory.log".to_string(),
+                line_number: 18,
+            },
+            IntuneEvent {
+                id: 3,
+                event_type: IntuneEventType::Other,
+                name: "ClientCertCheck Missing MDM Certificate".to_string(),
+                guid: None,
+                status: IntuneStatus::Failed,
+                start_time: Some("01-15-2024 10:02:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "MDM certs found in LocalMachine count: 0".to_string(),
+                source_file: "C:/Logs/ClientCertCheck.log".to_string(),
+                line_number: 4,
+            },
+        ];
+
+        let summary = build_summary(&events, &[]);
+
+        assert_eq!(summary.total_events, 1);
+        assert_eq!(summary.succeeded, 0);
+        assert_eq!(summary.failed, 1);
+    }
+
+    #[test]
+    fn build_summary_rolls_up_download_stats_and_events_without_double_counting() {
+        let events = vec![
+            IntuneEvent {
+                id: 1,
+                event_type: IntuneEventType::ContentDownload,
+                name: "AppWorkload Download (abcd1234...)".to_string(),
+                guid: Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string()),
+                status: IntuneStatus::InProgress,
+                start_time: Some("01-15-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "Starting content download".to_string(),
+                source_file: "C:/Logs/AppWorkload.log".to_string(),
+                line_number: 8,
+            },
+            IntuneEvent {
+                id: 2,
+                event_type: IntuneEventType::ContentDownload,
+                name: "AppWorkload Hash Validation (abcd1234...)".to_string(),
+                guid: Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string()),
+                status: IntuneStatus::Failed,
+                start_time: Some("01-15-2024 10:00:05.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "Hash validation failed after staging cached content".to_string(),
+                source_file: "C:/Logs/AppWorkload.log".to_string(),
+                line_number: 12,
+            },
+        ];
+        let downloads = vec![DownloadStat {
+            content_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string(),
+            name: "Contoso App Payload".to_string(),
+            size_bytes: 10,
+            speed_bps: 1.0,
+            do_percentage: 0.0,
+            duration_secs: 5.0,
+            success: false,
+            timestamp: Some("01-15-2024 10:00:05.000".to_string()),
+        }];
+
+        let summary = build_summary(&events, &downloads);
+
+        assert_eq!(summary.total_downloads, 1);
+        assert_eq!(summary.failed_downloads, 1);
+        assert_eq!(summary.successful_downloads, 0);
     }
 }

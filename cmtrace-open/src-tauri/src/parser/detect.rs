@@ -18,7 +18,7 @@ use super::{
 };
 use crate::models::log_entry::{
     DateFieldOrder, LogFormat, ParseQuality, ParserImplementation, ParserKind,
-    ParserProvenance, ParserSelectionInfo, RecordFraming,
+    ParserProvenance, ParserSelectionInfo, ParserSpecialization, RecordFraming,
 };
 
 /// Backend-owned parser selection used for both initial parsing and tailing.
@@ -30,6 +30,7 @@ pub struct ResolvedParser {
     pub parse_quality: ParseQuality,
     pub record_framing: RecordFraming,
     pub date_order: DateOrder,
+    pub specialization: Option<ParserSpecialization>,
 }
 
 impl ResolvedParser {
@@ -40,6 +41,7 @@ impl ResolvedParser {
         parse_quality: ParseQuality,
         record_framing: RecordFraming,
         date_order: DateOrder,
+        specialization: Option<ParserSpecialization>,
     ) -> Self {
         Self {
             parser,
@@ -48,6 +50,7 @@ impl ResolvedParser {
             parse_quality,
             record_framing,
             date_order,
+            specialization,
         }
     }
 
@@ -59,6 +62,7 @@ impl ResolvedParser {
             ParseQuality::Structured,
             RecordFraming::PhysicalLine,
             DateOrder::default(),
+            None,
         )
     }
 
@@ -70,6 +74,19 @@ impl ResolvedParser {
             ParseQuality::Structured,
             RecordFraming::PhysicalLine,
             DateOrder::default(),
+            None,
+        )
+    }
+
+    pub fn ime() -> Self {
+        Self::new(
+            ParserKind::Ccm,
+            ParserImplementation::Ccm,
+            ParserProvenance::Dedicated,
+            ParseQuality::Structured,
+            RecordFraming::LogicalRecord,
+            DateOrder::default(),
+            Some(ParserSpecialization::Ime),
         )
     }
 
@@ -81,6 +98,7 @@ impl ResolvedParser {
             ParseQuality::SemiStructured,
             RecordFraming::PhysicalLine,
             date_order,
+            None,
         )
     }
 
@@ -92,6 +110,7 @@ impl ResolvedParser {
             ParseQuality::SemiStructured,
             RecordFraming::LogicalRecord,
             DateOrder::default(),
+            None,
         )
     }
 
@@ -103,6 +122,7 @@ impl ResolvedParser {
             ParseQuality::SemiStructured,
             RecordFraming::LogicalRecord,
             DateOrder::default(),
+            None,
         )
     }
 
@@ -114,6 +134,7 @@ impl ResolvedParser {
             ParseQuality::SemiStructured,
             RecordFraming::LogicalRecord,
             DateOrder::default(),
+            None,
         )
     }
 
@@ -125,6 +146,7 @@ impl ResolvedParser {
             ParseQuality::TextFallback,
             RecordFraming::PhysicalLine,
             DateOrder::default(),
+            None,
         )
     }
 
@@ -136,6 +158,7 @@ impl ResolvedParser {
             ParseQuality::Structured,
             RecordFraming::PhysicalLine,
             DateOrder::default(),
+            None,
         )
     }
 
@@ -165,6 +188,7 @@ impl ResolvedParser {
                 }
                 _ => None,
             },
+            specialization: self.specialization,
         }
     }
 }
@@ -191,6 +215,17 @@ pub fn detect_parser(path: &str, content: &str) -> ResolvedParser {
     let reporting_events_path_hint = path_lower.ends_with("reportingevents.log")
         || path_lower.contains("/softwaredistribution/reportingevents.log")
         || path_lower.contains("\\softwaredistribution\\reportingevents.log");
+    let ime_path_hint = matches!(
+        path_lower.rsplit(['/', '\\']).next(),
+        Some(
+            "agentexecutor.log"
+                | "appactionprocessor.log"
+                | "appworkload.log"
+                | "clienthealth.log"
+                | "healthscripts.log"
+                | "intunemanagementextension.log"
+        )
+    );
 
     let mut ccm_count = 0;
     let mut cbs_count = 0;
@@ -230,7 +265,9 @@ pub fn detect_parser(path: &str, content: &str) -> ResolvedParser {
         }
     }
 
-    if ccm_count > 0 && ccm_count >= simple_count {
+    if ime_path_hint && ccm_count > 0 {
+        ResolvedParser::ime()
+    } else if ccm_count > 0 && ccm_count >= simple_count {
         ResolvedParser::ccm()
     } else if simple_count > 0 {
         ResolvedParser::simple()
@@ -270,6 +307,36 @@ mod tests {
         assert_eq!(detected.parser, ParserKind::Ccm);
         assert_eq!(detected.compatibility_format(), LogFormat::Ccm);
         assert_eq!(detected.provenance, ParserProvenance::Dedicated);
+        assert_eq!(detected.specialization, None);
+    }
+
+    #[test]
+    fn test_detect_ime_family_from_known_path_hint() {
+        let content = r#"<![LOG[Client Health evaluation starts.]LOG]!><time="23:00:10.6893636" date="11-12-2025" component="ClientHealth" context="" type="1" thread="1" file="">
+<![LOG[OnStart, public cloud env.]LOG]!><time="23:00:11.4573058" date="11-12-2025" component="ClientHealth" context="" type="1" thread="1" file="">"#;
+
+        let detected = detect_parser("C:/ProgramData/Microsoft/IntuneManagementExtension/Logs/ClientHealth.log", content);
+        let info = detected.to_info();
+
+        assert_eq!(detected.parser, ParserKind::Ccm);
+        assert_eq!(detected.implementation, ParserImplementation::Ccm);
+        assert_eq!(detected.record_framing, RecordFraming::LogicalRecord);
+        assert_eq!(detected.specialization, Some(ParserSpecialization::Ime));
+        assert_eq!(info.specialization, Some(ParserSpecialization::Ime));
+    }
+
+    #[test]
+    fn test_detect_known_ime_path_requires_ccm_content_before_specializing() {
+        let content = "2026-03-12 11:16:37.309 ClientHealth check starts\n2026-03-12 11:16:38.000 ClientHealth check ends";
+
+        let detected = detect_parser(
+            "C:/ProgramData/Microsoft/IntuneManagementExtension/Logs/ClientHealth.log",
+            content,
+        );
+
+        assert_eq!(detected.parser, ParserKind::Timestamped);
+        assert_eq!(detected.implementation, ParserImplementation::GenericTimestamped);
+        assert_eq!(detected.specialization, None);
     }
 
     #[test]
@@ -435,6 +502,7 @@ Message two $$<Comp2><01-01-2024 08:00:01.000+000><thread=200>"#;
             ParseQuality::SemiStructured,
             RecordFraming::LogicalRecord,
             DateOrder::MonthFirst,
+            None,
         );
 
         let info = selection.to_info();
@@ -445,6 +513,7 @@ Message two $$<Comp2><01-01-2024 08:00:01.000+000><thread=200>"#;
         assert_eq!(info.parse_quality, ParseQuality::SemiStructured);
         assert_eq!(info.record_framing, RecordFraming::LogicalRecord);
         assert_eq!(info.date_order, None);
+        assert_eq!(info.specialization, None);
         assert_eq!(selection.compatibility_format(), LogFormat::Timestamped);
     }
 }

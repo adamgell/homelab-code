@@ -9,9 +9,12 @@ use super::models::DownloadStat;
 
 static DOWNLOAD_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)(?:download|downloading|content\s+download|delivery\s+optimization|bytes\s+downloaded|staging\s+(?:file|content)|hash\s+validation|content\s+cached|cache\s+location)"#,
+        r#"(?i)(?:(?-u:\b)download(?:ing|ed)?(?-u:\b)|content\s+download|delivery\s+optimization|bytes\s+downloaded|staging\s+(?:file|content)|hash\s+validation|content\s+cached|cache\s+location)"#,
     )
     .unwrap()
+});
+static DOWNLOAD_IGNORE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)adding\s+new\s+state\s+transition\s*-\s*from:"#).unwrap()
 });
 static SIZE_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:content\s+)?size[:\s]+([\d.]+)\s*(bytes|kb|mb|gb)"#).unwrap()
@@ -52,11 +55,21 @@ static DOWNLOAD_STALL_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:stalled|not\s+progressing|no\s+progress|timed?\s*out|timeout|retry\s+exhausted)"#)
         .unwrap()
 });
-static APPWORKLOAD_RETRY_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"(?i)(?:retry|retrying|reattempt|will\s+retry)"#).unwrap());
+static APPWORKLOAD_RETRY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)(?:(?-u:\b)retrying(?-u:\b)|(?-u:\b)reattempt(?:ing)?(?-u:\b)|will\s+retry|retry\s+exhausted|failed[^\r\n]{0,80}retry)"#).unwrap()
+});
 static DURATION_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"(?i)(?:duration|took|elapsed)[:\s]+([\d.]+)\s*(s(?:ec(?:ond)?s?)?|m(?:in(?:ute)?s?)?)"#)
         .unwrap()
+});
+static APP_ID_JSON_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"\"AppId\"\s*:\s*\"([0-9a-fA-F-]{36})\""#).unwrap()
+});
+static APP_NAME_JSON_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"\"ApplicationName\"\s*:\s*\"([^\"]+)\""#).unwrap()
+});
+static SETUP_FILE_JSON_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"\"SetUpFilePath\"\s*:\s*\"([^\"]+)\""#).unwrap()
 });
 
 pub fn extract_downloads(lines: &[ImeLine], source_file: &str) -> Vec<DownloadStat> {
@@ -70,17 +83,22 @@ pub fn extract_downloads(lines: &[ImeLine], source_file: &str) -> Vec<DownloadSt
 
     for line in lines {
         let msg = &line.message;
-        if !DOWNLOAD_RE.is_match(msg) {
+        let Some(analysis) = DownloadLineAnalysis::from_message(msg) else {
             continue;
-        }
+        };
 
-        let content_id = extract_content_id(msg).unwrap_or_else(|| "unknown".to_string());
+        let content_id = analysis
+            .content_id
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let display_name = analysis.display_name.clone();
 
-        if APPWORKLOAD_RETRY_RE.is_match(msg) {
+        if analysis.is_retry {
             if let Some(stat) = finalize_download(
                 active.remove(&content_id),
                 Some(content_id.clone()),
-                msg,
+                display_name.clone(),
+                &analysis,
                 line.timestamp.as_deref(),
                 false,
             ) {
@@ -89,23 +107,28 @@ pub fn extract_downloads(lines: &[ImeLine], source_file: &str) -> Vec<DownloadSt
 
             active.insert(
                 content_id.clone(),
-                PartialDownload::new(Some(content_id), line.timestamp.clone()),
+                PartialDownload::new(Some(content_id), display_name, line.timestamp.clone()),
             );
             continue;
         }
 
-        if DOWNLOAD_START_RE.is_match(msg) || DOWNLOAD_PROGRESS_RE.is_match(msg) {
+        if analysis.is_start || analysis.is_progress {
             let entry = active.entry(content_id.clone()).or_insert_with(|| {
-                PartialDownload::new(Some(content_id.clone()), line.timestamp.clone())
+                PartialDownload::new(
+                    Some(content_id.clone()),
+                    display_name.clone(),
+                    line.timestamp.clone(),
+                )
             });
-            update_download(entry, msg, line.timestamp.as_deref());
+            apply_download_analysis(entry, &analysis, line.timestamp.as_deref());
         }
 
-        if DOWNLOAD_COMPLETE_RE.is_match(msg) {
+        if analysis.is_complete {
             if let Some(stat) = finalize_download(
                 active.remove(&content_id),
                 Some(content_id),
-                msg,
+                display_name,
+                &analysis,
                 line.timestamp.as_deref(),
                 true,
             ) {
@@ -114,11 +137,12 @@ pub fn extract_downloads(lines: &[ImeLine], source_file: &str) -> Vec<DownloadSt
             continue;
         }
 
-        if DOWNLOAD_FAILED_RE.is_match(msg) || DOWNLOAD_STALL_RE.is_match(msg) {
+        if analysis.is_failed || analysis.is_stall {
             if let Some(stat) = finalize_download(
                 active.remove(&content_id),
                 Some(content_id),
-                msg,
+                display_name,
+                &analysis,
                 line.timestamp.as_deref(),
                 false,
             ) {
@@ -134,7 +158,10 @@ pub fn extract_downloads(lines: &[ImeLine], source_file: &str) -> Vec<DownloadSt
                     .content_id
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
-                name: short_id(partial.content_id.as_deref().unwrap_or("unknown")),
+                name: partial
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| short_id(partial.content_id.as_deref().unwrap_or("unknown"))),
                 size_bytes: partial.size_bytes.unwrap_or(0),
                 speed_bps: partial.speed_bps.unwrap_or(0.0),
                 do_percentage: partial.do_percentage.unwrap_or(0.0),
@@ -148,8 +175,64 @@ pub fn extract_downloads(lines: &[ImeLine], source_file: &str) -> Vec<DownloadSt
     downloads
 }
 
+#[derive(Debug, Clone, Default)]
+struct DownloadLineAnalysis {
+    content_id: Option<String>,
+    display_name: Option<String>,
+    size_bytes: Option<u64>,
+    speed_bps: Option<f64>,
+    do_percentage: Option<f64>,
+    duration_secs: Option<f64>,
+    is_retry: bool,
+    is_start: bool,
+    is_progress: bool,
+    is_complete: bool,
+    is_failed: bool,
+    is_stall: bool,
+}
+
+impl DownloadLineAnalysis {
+    fn from_message(msg: &str) -> Option<Self> {
+        if DOWNLOAD_IGNORE_RE.is_match(msg) || !DOWNLOAD_RE.is_match(msg) {
+            return None;
+        }
+
+        let size_bytes = capture_number_and_unit(&SIZE_RE, msg)
+            .map(|(value, unit)| convert_size_to_bytes(value, unit));
+        let speed_bps = capture_number_and_unit(&SPEED_RE, msg)
+            .map(|(value, unit)| convert_speed_to_bps(value, unit));
+        let do_percentage = DO_RE
+            .captures(msg)
+            .and_then(|captures| captures.get(1))
+            .and_then(|capture| capture.as_str().parse::<f64>().ok());
+        let duration_secs = capture_number_and_unit(&DURATION_RE, msg).map(|(value, unit)| {
+            if unit.starts_with('m') {
+                value * 60.0
+            } else {
+                value
+            }
+        });
+
+        Some(Self {
+            content_id: extract_content_id(msg),
+            display_name: extract_display_name(msg),
+            size_bytes,
+            speed_bps,
+            do_percentage,
+            duration_secs,
+            is_retry: APPWORKLOAD_RETRY_RE.is_match(msg),
+            is_start: DOWNLOAD_START_RE.is_match(msg),
+            is_progress: DOWNLOAD_PROGRESS_RE.is_match(msg),
+            is_complete: DOWNLOAD_COMPLETE_RE.is_match(msg),
+            is_failed: DOWNLOAD_FAILED_RE.is_match(msg),
+            is_stall: DOWNLOAD_STALL_RE.is_match(msg),
+        })
+    }
+}
+
 struct PartialDownload {
     content_id: Option<String>,
+    display_name: Option<String>,
     start_time: Option<String>,
     last_timestamp: Option<String>,
     size_bytes: Option<u64>,
@@ -162,9 +245,10 @@ struct PartialDownload {
 }
 
 impl PartialDownload {
-    fn new(content_id: Option<String>, start_time: Option<String>) -> Self {
+    fn new(content_id: Option<String>, display_name: Option<String>, start_time: Option<String>) -> Self {
         Self {
             content_id,
+            display_name,
             start_time,
             last_timestamp: None,
             size_bytes: None,
@@ -201,53 +285,117 @@ fn classify_download_source(source_file: &str) -> DownloadSourceKind {
 }
 
 fn extract_content_id(msg: &str) -> Option<String> {
+    if let Some(value) = extract_json_field(msg, "\"AppId\":\"", "\"") {
+        return Some(value.to_string());
+    }
+    if let Some(value) = extract_json_field(msg, "\\\"AppId\\\":\\\"", "\\\"") {
+        return Some(value.to_string());
+    }
+
     CONTENT_ID_RE
         .captures(msg)
         .and_then(|captures| captures.get(1))
         .map(|value| value.as_str().to_string())
+        .or_else(|| {
+            APP_ID_JSON_RE
+                .captures(msg)
+                .and_then(|captures| captures.get(1))
+                .map(|value| value.as_str().to_string())
+        })
 }
 
-fn update_download(download: &mut PartialDownload, msg: &str, timestamp: Option<&str>) {
+fn extract_display_name(msg: &str) -> Option<String> {
+    if let Some(value) = extract_json_field(msg, "\"ApplicationName\":\"", "\"") {
+        return Some(value.to_string());
+    }
+    if let Some(value) = extract_json_field(
+        msg,
+        "\\\"ApplicationName\\\":\\\"",
+        "\\\"",
+    ) {
+        return Some(value.to_string());
+    }
+    if let Some(value) = extract_json_field(msg, "\"SetUpFilePath\":\"", "\"") {
+        return Some(setup_file_name(value));
+    }
+    if let Some(value) = extract_json_field(
+        msg,
+        "\\\"SetUpFilePath\\\":\\\"",
+        "\\\"",
+    ) {
+        return Some(setup_file_name(value));
+    }
+
+    APP_NAME_JSON_RE
+        .captures(msg)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_string())
+        .or_else(|| {
+            SETUP_FILE_JSON_RE
+                .captures(msg)
+                .and_then(|captures| captures.get(1))
+                .map(|value| setup_file_name(value.as_str()))
+        })
+}
+
+fn extract_json_field<'a>(msg: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+    let start = msg.find(prefix)? + prefix.len();
+    let remainder = msg.get(start..)?;
+    let end = remainder.find(suffix)?;
+    remainder.get(..end)
+}
+
+fn setup_file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_string()
+}
+
+fn apply_download_analysis(
+    download: &mut PartialDownload,
+    analysis: &DownloadLineAnalysis,
+    timestamp: Option<&str>,
+) {
     if download.start_time.is_none() {
         download.start_time = timestamp.map(|value| value.to_string());
     }
     download.last_timestamp = timestamp.map(|value| value.to_string());
 
-    if let Some(content_id) = extract_content_id(msg) {
+    if let Some(content_id) = analysis.content_id.clone() {
         if download.content_id.is_none() || download.content_id.as_deref() == Some("unknown") {
             download.content_id = Some(content_id);
         }
     }
+    if download.display_name.is_none() {
+        download.display_name = analysis.display_name.clone();
+    }
 
-    if DOWNLOAD_PROGRESS_RE.is_match(msg) {
+    if analysis.is_progress {
         download.saw_progress = true;
     }
-    if DOWNLOAD_FAILED_RE.is_match(msg) || DOWNLOAD_STALL_RE.is_match(msg) {
+    if analysis.is_failed || analysis.is_stall {
         download.saw_failure_signal = true;
     }
-    if APPWORKLOAD_RETRY_RE.is_match(msg) {
+    if analysis.is_retry {
         download.saw_retry_signal = true;
     }
 
-    if let Some((value, unit)) = capture_number_and_unit(&SIZE_RE, msg) {
-        download.size_bytes = Some(convert_size_to_bytes(value, unit));
+    if let Some(size_bytes) = analysis.size_bytes {
+        download.size_bytes = Some(size_bytes);
     }
 
-    if let Some((value, unit)) = capture_number_and_unit(&SPEED_RE, msg) {
-        download.speed_bps = Some(convert_speed_to_bps(value, unit));
+    if let Some(speed_bps) = analysis.speed_bps {
+        download.speed_bps = Some(speed_bps);
     }
 
-    if let Some(captures) = DO_RE.captures(msg) {
-        if let Some(value) = captures
-            .get(1)
-            .and_then(|capture| capture.as_str().parse::<f64>().ok())
-        {
-            download.do_percentage = Some(value);
-        }
+    if let Some(do_percentage) = analysis.do_percentage {
+        download.do_percentage = Some(do_percentage);
     }
 
-    if let Some((value, unit)) = capture_number_and_unit(&DURATION_RE, msg) {
-        download.duration_secs = Some(if unit.starts_with('m') { value * 60.0 } else { value });
+    if let Some(duration_secs) = analysis.duration_secs {
+        download.duration_secs = Some(duration_secs);
     }
 }
 
@@ -283,30 +431,38 @@ fn convert_speed_to_bps(value: f64, unit: &str) -> f64 {
 fn finalize_download(
     partial: Option<PartialDownload>,
     content_id: Option<String>,
-    msg: &str,
+    display_name: Option<String>,
+    analysis: &DownloadLineAnalysis,
     timestamp: Option<&str>,
     success: bool,
 ) -> Option<DownloadStat> {
     let mut partial = partial.unwrap_or_else(|| {
-        PartialDownload::new(content_id.clone(), timestamp.map(|value| value.to_string()))
+        PartialDownload::new(
+            content_id.clone(),
+            display_name.clone(),
+            timestamp.map(|value| value.to_string()),
+        )
     });
-    update_download(&mut partial, msg, timestamp);
+    apply_download_analysis(&mut partial, analysis, timestamp);
+
+    if partial.display_name.is_none() {
+        partial.display_name = display_name;
+    }
 
     let resolved_content_id = content_id
         .or(partial.content_id.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    if !success
-        && !partial.saw_failure_signal
-        && !partial.saw_retry_signal
-        && !DOWNLOAD_STALL_RE.is_match(msg)
-    {
+    if !success && !partial.saw_failure_signal && !partial.saw_retry_signal && !analysis.is_stall {
         return None;
     }
 
     Some(DownloadStat {
         content_id: resolved_content_id.clone(),
-        name: short_id(&resolved_content_id),
+        name: partial
+            .display_name
+            .clone()
+            .unwrap_or_else(|| short_id(&resolved_content_id)),
         size_bytes: partial.size_bytes.unwrap_or(0),
         speed_bps: partial.speed_bps.unwrap_or(0.0),
         do_percentage: partial.do_percentage.unwrap_or(0.0),
@@ -409,5 +565,65 @@ mod tests {
         let downloads = extract_downloads(&lines, "C:/Logs/AppWorkload.log");
         assert_eq!(downloads.len(), 1);
         assert!(!downloads[0].success);
+    }
+
+    #[test]
+    fn ime_transition_template_is_ignored() {
+        let lines = vec![ImeLine {
+            line_number: 1,
+            timestamp: Some("01-15-2024 10:00:00.000".to_string()),
+            message: "Adding new state transition - From: Install In Progress To: Download In Progress With Event: Download Started.".to_string(),
+            component: None,
+        }];
+
+        let downloads = extract_downloads(&lines, "C:/Logs/IntuneManagementExtension.log");
+        assert!(downloads.is_empty());
+    }
+
+    #[test]
+    fn appworkload_metadata_does_not_create_retry_failure() {
+        let lines = vec![ImeLine {
+            line_number: 1,
+            timestamp: Some("01-15-2024 10:00:00.000".to_string()),
+            message: r#"RequestPayload: {\"AppId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\"MaxRetries\":3,\"RetryIntervalInMinutes\":5,\"DownloadStartTimeUTC\":\"\\/Date(-62135578800000)\\/\"}"#.to_string(),
+            component: None,
+        }];
+
+        let downloads = extract_downloads(&lines, "C:/Logs/AppWorkload.log");
+        assert!(downloads.is_empty());
+    }
+
+    #[test]
+    fn json_app_identity_is_used_for_real_download_lines() {
+        let lines = vec![
+            ImeLine {
+                line_number: 1,
+                timestamp: Some("01-15-2024 10:00:00.000".to_string()),
+                message: r#"Starting content download RequestPayload: {\"AppId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\"ApplicationName\":\"Contoso App\"}"#.to_string(),
+                component: None,
+            },
+            ImeLine {
+                line_number: 2,
+                timestamp: Some("01-15-2024 10:00:05.000".to_string()),
+                message: r#"Download completed successfully RequestPayload: {\"AppId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\"ApplicationName\":\"Contoso App\"}"#.to_string(),
+                component: None,
+            },
+        ];
+
+        let downloads = extract_downloads(&lines, "C:/Logs/AppWorkload.log");
+        assert_eq!(downloads.len(), 1);
+        assert_eq!(downloads[0].content_id, "a1b2c3d4-e5f6-7890-abcd-ef1234567890");
+        assert_eq!(downloads[0].name, "Contoso App");
+    }
+
+    #[test]
+    fn escaped_json_fields_are_extracted_without_normalization() {
+        let message = r#"Download completed successfully RequestPayload: {\"AppId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\"ApplicationName\":\"Contoso App\",\"SetUpFilePath\":\"C:\\Cache\\setup.exe\"}"#;
+
+        assert_eq!(
+            extract_content_id(message).as_deref(),
+            Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890")
+        );
+        assert_eq!(extract_display_name(message).as_deref(), Some("Contoso App"));
     }
 }

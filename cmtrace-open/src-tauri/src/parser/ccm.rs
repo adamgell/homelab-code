@@ -11,7 +11,7 @@ use once_cell::sync::Lazy;
 use regex::Regex;
 
 use super::severity::detect_severity_from_text;
-use crate::models::log_entry::{LogEntry, LogFormat, Severity};
+use crate::models::log_entry::{LogEntry, LogFormat, ParserSpecialization, Severity};
 
 /// Compiled regex matching a complete CCM log line.
 ///
@@ -43,11 +43,7 @@ fn parse_line(line: &str) -> Option<CcmParsed> {
     let s: u32 = caps.name("s")?.as_str().parse().ok()?;
     let ms_str = caps.name("ms")?.as_str();
     // Truncate milliseconds to 3 digits (matching CMTrace behavior)
-    let ms: u32 = if ms_str.len() > 3 {
-        ms_str[..3].parse().ok()?
-    } else {
-        ms_str.parse().ok()?
-    };
+    let ms = truncate_subsecond_to_millis(ms_str)?;
     let tz: i32 = caps.name("tz")?.as_str().parse().ok()?;
     let mon: u32 = caps.name("mon")?.as_str().parse().ok()?;
     let day: u32 = caps.name("day")?.as_str().parse().ok()?;
@@ -57,24 +53,9 @@ fn parse_line(line: &str) -> Option<CcmParsed> {
     let thr: u32 = caps.name("thr")?.as_str().parse().ok()?;
     let file = caps.name("file").map(|m| m.as_str().to_string());
 
-    let severity = match typ {
-        2 => Severity::Warning,
-        3 => Severity::Error,
-        _ => Severity::Info, // type=1 or anything else
-    };
-
-    // Build timestamp using chrono
-    let timestamp = chrono::NaiveDate::from_ymd_opt(yr, mon, day)
-        .and_then(|d| d.and_hms_milli_opt(h, m, s, ms))
-        .map(|dt| dt.and_utc().timestamp_millis());
-
-    // Format display string: "MM-dd-yyyy HH:mm:ss.fff"
-    let timestamp_display = Some(format!(
-        "{:02}-{:02}-{:04} {:02}:{:02}:{:02}.{:03}",
-        mon, day, yr, h, m, s, ms
-    ));
-
-    let thread_display = Some(format!("{} (0x{:04X})", thr, thr));
+    let severity = severity_from_type_field(Some(typ), &msg);
+    let (timestamp, timestamp_display) = build_timestamp(mon, day, yr, h, m, s, ms);
+    let thread_display = Some(format_thread_display(thr));
 
     Some(CcmParsed {
         message: msg,
@@ -99,6 +80,72 @@ struct CcmParsed {
     thread_display: Option<String>,
     source_file: Option<String>,
     timezone_offset: i32,
+}
+
+pub(crate) fn truncate_subsecond_to_millis(value: &str) -> Option<u32> {
+    if value.len() > 3 {
+        value[..3].parse().ok()
+    } else {
+        value.parse().ok()
+    }
+}
+
+pub(crate) fn build_timestamp(
+    month: u32,
+    day: u32,
+    year: i32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+    millis: u32,
+) -> (Option<i64>, Option<String>) {
+    let timestamp = chrono::NaiveDate::from_ymd_opt(year, month, day)
+        .and_then(|date| date.and_hms_milli_opt(hour, minute, second, millis))
+        .map(|value| value.and_utc().timestamp_millis());
+    let timestamp_display = Some(format!(
+        "{:02}-{:02}-{:04} {:02}:{:02}:{:02}.{:03}",
+        month, day, year, hour, minute, second, millis
+    ));
+
+    (timestamp, timestamp_display)
+}
+
+pub(crate) fn severity_from_type_field(type_value: Option<u32>, message: &str) -> Severity {
+    match type_value {
+        Some(2) => Severity::Warning,
+        Some(3) => Severity::Error,
+        Some(_) => Severity::Info,
+        None => detect_severity_from_text(message),
+    }
+}
+
+pub(crate) fn format_thread_display(thread: u32) -> String {
+    format!("{} (0x{:04X})", thread, thread)
+}
+
+pub fn parse_content(
+    content: &str,
+    file_path: &str,
+    specialization: Option<ParserSpecialization>,
+) -> (Vec<LogEntry>, u32) {
+    match specialization {
+        Some(ParserSpecialization::Ime) => crate::intune::ime_parser::parse_ime_entries(content, file_path),
+        None => {
+            let lines: Vec<&str> = content.lines().collect();
+            parse_lines(&lines, file_path)
+        }
+    }
+}
+
+pub fn parse_lines_with_specialization(
+    lines: &[&str],
+    file_path: &str,
+    specialization: Option<ParserSpecialization>,
+) -> (Vec<LogEntry>, u32) {
+    match specialization {
+        Some(ParserSpecialization::Ime) => parse_content(&lines.join("\n"), file_path, specialization),
+        None => parse_lines(lines, file_path),
+    }
 }
 
 /// Parse all lines as CCM format.
@@ -213,5 +260,28 @@ mod tests {
             Severity::Warning
         );
         assert_eq!(detect_severity_from_text("All good"), Severity::Info);
+    }
+
+    #[test]
+    fn test_parse_lines_with_ime_specialization_preserves_logical_records() {
+        let lines = [
+            r#"<![LOG[Powershell execution is done, exitCode = 1]LOG]!><time="11:16:37.3093207" date="3-12-2026" component="HealthScripts" context="" type="1" thread="50" file="">"#,
+            r#"<![LOG[[HS] err output = Downloaded profile payload is not valid JSON."#,
+            r#"At C:\Windows\IMECache\HealthScripts\script.ps1:457 char:9"#,
+            r#"]LOG]!><time="11:16:42.3322734" date="3-12-2026" component="HealthScripts" context="" type="3" thread="50" file="">"#,
+        ];
+
+        let (entries, parse_errors) = parse_lines_with_specialization(
+            &lines,
+            "HealthScripts.log",
+            Some(ParserSpecialization::Ime),
+        );
+
+        assert_eq!(parse_errors, 0);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].format, LogFormat::Ccm);
+        assert_eq!(entries[1].line_number, 2);
+        assert!(entries[1].message.contains("Downloaded profile payload is not valid JSON"));
+        assert!(entries[1].message.contains("At C:\\Windows\\IMECache\\HealthScripts\\script.ps1:457 char:9"));
     }
 }

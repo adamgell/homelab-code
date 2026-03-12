@@ -63,6 +63,28 @@ export interface IntuneDominantSource {
   eventShare: number | null;
 }
 
+export type IntuneLogSourceKind =
+  | "appworkload"
+  | "appactionprocessor"
+  | "agentexecutor"
+  | "healthscripts"
+  | "clienthealth"
+  | "clientcertcheck"
+  | "devicehealthmonitoring"
+  | "sensor"
+  | "win32appinventory"
+  | "intunemanagementextension"
+  | "other";
+
+export interface IntuneSourceFamilySummary {
+  kind: IntuneLogSourceKind;
+  label: string;
+  fileCount: number;
+  contributingFileCount: number;
+  eventCount: number;
+  downloadCount: number;
+}
+
 export interface IntuneDiagnosticsCoverage {
   files: IntuneDiagnosticsFileCoverage[];
   timestampBounds: IntuneTimestampBounds | null;
@@ -109,9 +131,6 @@ export interface IntuneSummary {
   failedDownloads: number;
   failedScripts: number;
   logTimeSpan: string | null;
-  diagnosticsCoverage?: IntuneDiagnosticsCoverage;
-  diagnosticsConfidence?: IntuneDiagnosticsConfidence;
-  repeatedFailures?: IntuneRepeatedFailureGroup[];
 }
 
 export type IntuneDiagnosticSeverity = "Info" | "Warning" | "Error";
@@ -160,6 +179,12 @@ export interface IntuneAnalysisResult {
   diagnostics: IntuneDiagnosticInsight[];
   sourceFile: string;
   sourceFiles: string[];
+  diagnosticsCoverage: IntuneDiagnosticsCoverage;
+  diagnosticsConfidence: IntuneDiagnosticsConfidence;
+  repeatedFailures: IntuneRepeatedFailureGroup[];
+}
+
+export interface IntuneResultMetadata {
   diagnosticsCoverage: IntuneDiagnosticsCoverage;
   diagnosticsConfidence: IntuneDiagnosticsConfidence;
   repeatedFailures: IntuneRepeatedFailureGroup[];

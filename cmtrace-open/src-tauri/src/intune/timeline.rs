@@ -1,8 +1,34 @@
 use std::collections::HashSet;
+use std::path::Path;
 
 use chrono::NaiveDateTime;
 
-use super::models::{IntuneEvent, IntuneStatus, IntuneTimestampBounds};
+use super::models::{IntuneEvent, IntuneEventType, IntuneStatus, IntuneTimestampBounds};
+
+struct TimelineEvent {
+    event: IntuneEvent,
+    parsed_time: Option<NaiveDateTime>,
+    source_identity: String,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct PairedEventKey {
+    guid: Option<String>,
+    event_type: IntuneEventType,
+    source_identity: String,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct ExactEventKey {
+    source_identity: String,
+    event_type: IntuneEventType,
+    status: IntuneStatus,
+    start_time: Option<String>,
+    end_time: Option<String>,
+    guid: Option<String>,
+    name: String,
+    detail: String,
+}
 
 /// Sort events chronologically and deduplicate paired events.
 /// After `event_tracker::extract_events` has already paired start/end events,
@@ -13,86 +39,126 @@ use super::models::{IntuneEvent, IntuneStatus, IntuneTimestampBounds};
 pub fn build_timeline(events: Vec<IntuneEvent>) -> Vec<IntuneEvent> {
     let mut timeline = deduplicate_events(events);
 
-    // Sort by parsed timestamp first, then source+line for deterministic ordering.
+    // Sort by the cached parsed timestamp first, then source+line for deterministic ordering.
     timeline.sort_by(|a, b| {
-        let a_time = parsed_event_time(a);
-        let b_time = parsed_event_time(b);
-
-        a_time
-            .cmp(&b_time)
-            .then_with(|| a.source_file.cmp(&b.source_file))
-            .then_with(|| a.line_number.cmp(&b.line_number))
-            .then_with(|| a.name.cmp(&b.name))
+        a.parsed_time
+            .cmp(&b.parsed_time)
+            .then_with(|| a.event.source_file.cmp(&b.event.source_file))
+            .then_with(|| a.event.line_number.cmp(&b.event.line_number))
+            .then_with(|| a.event.name.cmp(&b.event.name))
     });
 
     // Re-assign sequential IDs
-    for (i, event) in timeline.iter_mut().enumerate() {
-        event.id = i as u64;
+    for (i, entry) in timeline.iter_mut().enumerate() {
+        entry.event.id = i as u64;
     }
 
-    timeline
+    timeline.into_iter().map(|entry| entry.event).collect()
 }
 
 /// Remove duplicate or already-consumed events before timeline ordering.
 /// This keeps paired start events, drops consumed completion rows when they
 /// still leak through, and removes exact duplicate entries from the same file.
-fn deduplicate_events(events: Vec<IntuneEvent>) -> Vec<IntuneEvent> {
-    let paired_keys: HashSet<(Option<String>, String, String)> = events
-        .iter()
-        .filter(|e| e.end_time.is_some())
-        .map(|e| {
-            (
-                e.guid.clone(),
-                format!("{:?}", e.event_type),
-                e.source_file.clone(),
-            )
+fn deduplicate_events(events: Vec<IntuneEvent>) -> Vec<TimelineEvent> {
+    let prepared_events: Vec<TimelineEvent> = events
+        .into_iter()
+        .map(|event| TimelineEvent {
+            parsed_time: parsed_event_time(&event),
+            source_identity: normalized_source_identity(&event.source_file),
+            event,
         })
         .collect();
 
-    let mut seen_exact: HashSet<(String, u32, String, String, Option<String>, String)> =
-        HashSet::new();
+    let mut paired_keys: HashSet<PairedEventKey> = HashSet::with_capacity(prepared_events.len());
+    for prepared_event in &prepared_events {
+        if prepared_event.event.end_time.is_some() {
+            paired_keys.insert(PairedEventKey {
+                guid: prepared_event.event.guid.clone(),
+                event_type: prepared_event.event.event_type,
+                source_identity: prepared_event.source_identity.clone(),
+            });
+        }
+    }
 
-    let mut result = Vec::new();
-    for event in events {
-        let exact_key = (
-            event.source_file.clone(),
-            event.line_number,
-            format!("{:?}", event.event_type),
-            format!("{:?}", event.status),
-            event.start_time.clone(),
-            event.name.clone(),
-        );
+    let mut seen_exact: HashSet<ExactEventKey> = HashSet::with_capacity(prepared_events.len());
+    let mut result = Vec::with_capacity(prepared_events.len());
+    for prepared_event in prepared_events {
+        let exact_key = ExactEventKey {
+            source_identity: prepared_event.source_identity.clone(),
+            event_type: prepared_event.event.event_type,
+            status: prepared_event.event.status,
+            start_time: prepared_event.event.start_time.clone(),
+            end_time: prepared_event.event.end_time.clone(),
+            guid: prepared_event.event.guid.clone(),
+            name: prepared_event.event.name.clone(),
+            detail: prepared_event.event.detail.clone(),
+        };
 
         if !seen_exact.insert(exact_key) {
             continue;
         }
 
-        if event.end_time.is_some() {
-            result.push(event);
+        if prepared_event.event.end_time.is_some() {
+            result.push(prepared_event);
             continue;
         }
 
-        if event.guid.is_none() {
-            result.push(event);
+        if prepared_event.event.guid.is_none() {
+            result.push(prepared_event);
             continue;
         }
 
-        let key = (
-            event.guid.clone(),
-            format!("{:?}", event.event_type),
-            event.source_file.clone(),
-        );
-        let is_consumed_end = (event.status == IntuneStatus::Success
-            || event.status == IntuneStatus::Failed
-            || event.status == IntuneStatus::Timeout)
+        let key = PairedEventKey {
+            guid: prepared_event.event.guid.clone(),
+            event_type: prepared_event.event.event_type,
+            source_identity: prepared_event.source_identity.clone(),
+        };
+        let is_consumed_end = matches!(
+            prepared_event.event.status,
+            IntuneStatus::Success | IntuneStatus::Failed | IntuneStatus::Timeout
+        )
             && paired_keys.contains(&key);
 
         if !is_consumed_end {
-            result.push(event);
+            result.push(prepared_event);
         }
     }
 
     result
+}
+
+pub fn normalized_source_identity(source_file: &str) -> String {
+    let stem = Path::new(source_file)
+        .file_stem()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| source_file.to_string());
+
+    for separator in [".", "-", "_"] {
+        if let Some((base, suffix)) = stem.rsplit_once(separator) {
+            if is_rotation_suffix(suffix) {
+                return base.to_ascii_lowercase();
+            }
+        }
+    }
+
+    stem.to_ascii_lowercase()
+}
+
+fn is_rotation_suffix(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return false;
+    }
+
+    if normalized.chars().all(|ch| ch.is_ascii_digit()) {
+        return true;
+    }
+
+    if normalized.starts_with("lo_") || normalized == "bak" || normalized == "old" {
+        return true;
+    }
+
+    normalized.len() == 8 && normalized.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn parsed_event_time(event: &IntuneEvent) -> Option<NaiveDateTime> {
@@ -376,5 +442,70 @@ mod tests {
 
         let timeline = build_timeline(vec![event.clone(), event]);
         assert_eq!(timeline.len(), 1);
+    }
+
+    #[test]
+    fn build_timeline_deduplicates_rotated_duplicate_events() {
+        let event = IntuneEvent {
+            id: 0,
+            event_type: super::super::models::IntuneEventType::ContentDownload,
+            name: "AppWorkload Hash Validation (abcd1234...)".to_string(),
+            guid: Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string()),
+            status: IntuneStatus::Failed,
+            start_time: Some("01-15-2024 10:00:00.000".to_string()),
+            end_time: None,
+            duration_secs: None,
+            error_code: None,
+            detail: "Hash validation failed after staging cached content".to_string(),
+            source_file: "C:/Logs/AppWorkload.log".to_string(),
+            line_number: 12,
+        };
+
+        let mut rotated = event.clone();
+        rotated.id = 1;
+        rotated.source_file = "C:/Logs/AppWorkload-1.log".to_string();
+        rotated.line_number = 44;
+
+        let timeline = build_timeline(vec![event, rotated]);
+        assert_eq!(timeline.len(), 1);
+    }
+
+    #[test]
+    fn build_timeline_reassigns_ids_after_sorting() {
+        let timeline = build_timeline(vec![
+            IntuneEvent {
+                id: 41,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Later".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("12-31-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "later".to_string(),
+                source_file: "b.log".to_string(),
+                line_number: 2,
+            },
+            IntuneEvent {
+                id: 99,
+                event_type: super::super::models::IntuneEventType::Win32App,
+                name: "Earlier".to_string(),
+                guid: None,
+                status: IntuneStatus::InProgress,
+                start_time: Some("01-01-2024 10:00:00.000".to_string()),
+                end_time: None,
+                duration_secs: None,
+                error_code: None,
+                detail: "earlier".to_string(),
+                source_file: "a.log".to_string(),
+                line_number: 1,
+            },
+        ]);
+
+        assert_eq!(timeline[0].id, 0);
+        assert_eq!(timeline[1].id, 1);
+        assert_eq!(timeline[0].name, "Earlier");
+        assert_eq!(timeline[1].name, "Later");
     }
 }

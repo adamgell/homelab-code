@@ -1,5 +1,42 @@
 use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 
+/// Artifact count summary retained from an evidence bundle manifest.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceBundleArtifactCounts {
+    pub collected: u64,
+    pub missing: u64,
+    pub failed: u64,
+    pub skipped: u64,
+}
+
+/// Metadata retained when Intune analysis is sourced from a collected evidence bundle.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EvidenceBundleMetadata {
+    pub manifest_path: String,
+    pub notes_path: Option<String>,
+    pub evidence_root: Option<String>,
+    #[serde(default)]
+    pub primary_entry_points: Vec<String>,
+    #[serde(default)]
+    pub available_primary_entry_points: Vec<String>,
+    pub bundle_id: Option<String>,
+    pub bundle_label: Option<String>,
+    pub created_utc: Option<String>,
+    pub case_reference: Option<String>,
+    pub summary: Option<String>,
+    pub collector_profile: Option<String>,
+    pub collector_version: Option<String>,
+    pub collected_utc: Option<String>,
+    pub device_name: Option<String>,
+    pub primary_user: Option<String>,
+    pub platform: Option<String>,
+    pub os_version: Option<String>,
+    pub tenant: Option<String>,
+    pub artifact_counts: Option<EvidenceBundleArtifactCounts>,
+}
+
 /// Severity level for generated diagnostic guidance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum IntuneDiagnosticSeverity {
@@ -23,7 +60,7 @@ pub struct IntuneDiagnosticInsight {
 }
 
 /// Type of Intune event detected from log analysis.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum IntuneEventType {
     Win32App,
     WinGetApp,
@@ -37,7 +74,7 @@ pub enum IntuneEventType {
 }
 
 /// Status of an Intune operation.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum IntuneStatus {
     Success,
     Failed,
@@ -209,6 +246,9 @@ pub struct IntuneAnalysisResult {
     /// Grouped repeated failures behind the diagnostics contract.
     #[serde(default)]
     pub repeated_failures: Vec<IntuneRepeatedFailureGroup>,
+    /// Bundle metadata retained when the analyzed path is an evidence bundle root.
+    #[serde(default)]
+    pub evidence_bundle: Option<EvidenceBundleMetadata>,
 }
 
 impl Serialize for IntuneAnalysisResult {
@@ -216,7 +256,7 @@ impl Serialize for IntuneAnalysisResult {
     where
         S: Serializer,
     {
-        let mut state = serializer.serialize_struct("IntuneAnalysisResult", 9)?;
+        let mut state = serializer.serialize_struct("IntuneAnalysisResult", 10)?;
         state.serialize_field("events", &self.events)?;
         state.serialize_field("downloads", &self.downloads)?;
         state.serialize_field("summary", &self.summary)?;
@@ -226,6 +266,7 @@ impl Serialize for IntuneAnalysisResult {
         state.serialize_field("diagnosticsCoverage", &self.diagnostics_coverage)?;
         state.serialize_field("diagnosticsConfidence", &self.diagnostics_confidence)?;
         state.serialize_field("repeatedFailures", &self.repeated_failures)?;
+        state.serialize_field("evidenceBundle", &self.evidence_bundle)?;
         state.end()
     }
 }
@@ -249,4 +290,80 @@ pub struct IntuneSummary {
     pub failed_downloads: u32,
     pub failed_scripts: u32,
     pub log_time_span: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EvidenceBundleArtifactCounts, EvidenceBundleMetadata, IntuneAnalysisResult,
+        IntuneDiagnosticsConfidence, IntuneDiagnosticsCoverage, IntuneSummary,
+    };
+
+    #[test]
+    fn intune_analysis_result_serializes_evidence_bundle_metadata() {
+        let result = IntuneAnalysisResult {
+            events: Vec::new(),
+            downloads: Vec::new(),
+            summary: IntuneSummary {
+                total_events: 0,
+                win32_apps: 0,
+                winget_apps: 0,
+                scripts: 0,
+                remediations: 0,
+                succeeded: 0,
+                failed: 0,
+                in_progress: 0,
+                pending: 0,
+                timed_out: 0,
+                total_downloads: 0,
+                successful_downloads: 0,
+                failed_downloads: 0,
+                failed_scripts: 0,
+                log_time_span: None,
+            },
+            diagnostics: Vec::new(),
+            source_file: "bundle-root".to_string(),
+            source_files: Vec::new(),
+            diagnostics_coverage: IntuneDiagnosticsCoverage::default(),
+            diagnostics_confidence: IntuneDiagnosticsConfidence::default(),
+            repeated_failures: Vec::new(),
+            evidence_bundle: Some(EvidenceBundleMetadata {
+                manifest_path: "bundle-root/manifest.json".to_string(),
+                notes_path: Some("bundle-root/notes.md".to_string()),
+                evidence_root: Some("bundle-root/evidence".to_string()),
+                primary_entry_points: vec!["bundle-root/evidence/logs".to_string()],
+                available_primary_entry_points: vec!["bundle-root/evidence/logs".to_string()],
+                bundle_id: Some("CMTRACE-123".to_string()),
+                bundle_label: Some("intune-endpoint-evidence".to_string()),
+                created_utc: Some("2026-03-12T16:00:54Z".to_string()),
+                case_reference: Some("case-123".to_string()),
+                summary: Some("Collected bundle".to_string()),
+                collector_profile: Some("intune-windows-endpoint-v1".to_string()),
+                collector_version: Some("1.1.0".to_string()),
+                collected_utc: Some("2026-03-12T16:00:54Z".to_string()),
+                device_name: Some("GELL-VM-5879648".to_string()),
+                primary_user: Some("AzureAD\\AdamGell".to_string()),
+                platform: Some("Windows".to_string()),
+                os_version: Some("Windows 11".to_string()),
+                tenant: Some("CDWWorkspaceLab".to_string()),
+                artifact_counts: Some(EvidenceBundleArtifactCounts {
+                    collected: 55,
+                    missing: 7,
+                    failed: 2,
+                    skipped: 0,
+                }),
+            }),
+        };
+
+        let value = serde_json::to_value(&result).expect("serialize result");
+
+        assert_eq!(
+            value["evidenceBundle"]["bundleId"].as_str(),
+            Some("CMTRACE-123")
+        );
+        assert_eq!(
+            value["evidenceBundle"]["artifactCounts"]["collected"].as_u64(),
+            Some(55)
+        );
+    }
 }

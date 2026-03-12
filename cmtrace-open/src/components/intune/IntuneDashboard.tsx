@@ -4,7 +4,6 @@ import { useAppActions } from "../layout/Toolbar";
 import { EventTimeline } from "./EventTimeline";
 import { DownloadStats } from "./DownloadStats";
 import type {
-  DownloadStat,
   IntuneDiagnosticInsight,
   IntuneDiagnosticSeverity,
   IntuneDiagnosticsConfidence,
@@ -12,8 +11,10 @@ import type {
   IntuneDiagnosticsFileCoverage,
   IntuneEvent,
   IntuneEventType,
+  IntuneLogSourceKind,
   IntuneRepeatedFailureGroup,
   IntuneStatus,
+  IntuneSourceFamilySummary,
   IntuneSummary,
   IntuneTimestampBounds,
 } from "../../types/intune";
@@ -435,7 +436,6 @@ export function IntuneDashboard() {
                 summary={summary}
                 diagnostics={diagnostics}
                 events={events}
-                downloads={downloads}
                 sourceFile={sourceContext.analyzedPath}
                 sourceFiles={sourceContext.includedFiles}
               />
@@ -545,18 +545,19 @@ function SummaryView({
   summary,
   diagnostics,
   events,
-  downloads,
   sourceFile,
   sourceFiles,
 }: {
   summary: IntuneSummary;
   diagnostics: IntuneDiagnosticInsight[];
   events: IntuneEvent[];
-  downloads: DownloadStat[];
   sourceFile: string | null;
   sourceFiles: string[];
 }) {
   const setActiveTab = useIntuneStore((s) => s.setActiveTab);
+  const diagnosticsCoverage = useIntuneStore((s) => s.diagnosticsCoverage);
+  const diagnosticsConfidence = useIntuneStore((s) => s.diagnosticsConfidence);
+  const repeatedFailures = useIntuneStore((s) => s.repeatedFailures);
   const setFilterEventType = useIntuneStore((s) => s.setFilterEventType);
   const setFilterStatus = useIntuneStore((s) => s.setFilterStatus);
   const selectEvent = useIntuneStore((s) => s.selectEvent);
@@ -572,26 +573,18 @@ function SummaryView({
   const repeatedFailuresSectionRef = useRef<HTMLDivElement | null>(null);
   const diagnosticsGuidanceSectionRef = useRef<HTMLDivElement | null>(null);
 
-  const repeatedFailures = useMemo(
-    () => summary.repeatedFailures ?? buildDerivedRepeatedFailures(events),
-    [events, summary.repeatedFailures]
-  );
-
-  const diagnosticsCoverage = useMemo(
-    () => summary.diagnosticsCoverage ?? buildDerivedCoverage(sourceFiles, events, downloads),
-    [downloads, events, sourceFiles, summary.diagnosticsCoverage]
-  );
-
-  const diagnosticsConfidence = useMemo(
-    () =>
-      summary.diagnosticsConfidence ??
-      buildDerivedConfidence(summary, diagnosticsCoverage, repeatedFailures, events),
-    [diagnosticsCoverage, events, repeatedFailures, summary, summary.diagnosticsConfidence]
-  );
-
   const contributingFileCount = diagnosticsCoverage.files.filter(
     (file) => file.eventCount > 0 || file.downloadCount > 0
   ).length;
+  const sourceFamilies = useMemo(
+    () => buildSourceFamilySummary(diagnosticsCoverage.files),
+    [diagnosticsCoverage.files]
+  );
+  const visibleSourceFamilies = sourceFamilies.slice(0, 4);
+  const hiddenSourceFamilyCount = Math.max(
+    sourceFamilies.length - visibleSourceFamilies.length,
+    0
+  );
   const visibleConfidenceReasons = showAllConfidenceReasons
     ? diagnosticsConfidence.reasons
     : diagnosticsConfidence.reasons.slice(0, 2);
@@ -786,6 +779,7 @@ function SummaryView({
             >
               <CompactFact label="Files" value={String(diagnosticsCoverage.files.length)} />
               <CompactFact label="Contributing" value={String(contributingFileCount)} color="#2563eb" />
+              <CompactFact label="Families" value={String(sourceFamilies.length)} color="#0f766e" />
               <CompactFact
                 label="Rotated"
                 value={diagnosticsCoverage.hasRotatedLogs ? "Yes" : "No"}
@@ -814,6 +808,45 @@ function SummaryView({
               >
                 <strong style={{ color: "#0f172a" }}>Timestamp Bounds:</strong>{" "}
                 {formatTimestampBounds(diagnosticsCoverage.timestampBounds)}
+              </div>
+            )}
+
+            {sourceFamilies.length > 0 && (
+              <div
+                style={{
+                  marginBottom: diagnosticsCoverage.files.length > 0 ? "10px" : 0,
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: "11px",
+                    fontWeight: 700,
+                    color: "#475569",
+                    marginBottom: "6px",
+                  }}
+                >
+                  Source families
+                </div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                  {visibleSourceFamilies.map((family) => (
+                    <SourceFamilyBadge key={family.kind} family={family} />
+                  ))}
+                  {hiddenSourceFamilyCount > 0 && (
+                    <span
+                      style={{
+                        fontSize: "10px",
+                        padding: "4px 8px",
+                        borderRadius: "999px",
+                        border: "1px solid #cbd5e1",
+                        backgroundColor: "#f8fafc",
+                        color: "#475569",
+                        fontWeight: 700,
+                      }}
+                    >
+                      +{hiddenSourceFamilyCount} more
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
@@ -1137,8 +1170,53 @@ function CompactFact({
   );
 }
 
+function SourceFamilyBadge({ family }: { family: IntuneSourceFamilySummary }) {
+  const tone = getSourceKindTone(family.kind);
+
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "6px",
+        padding: "4px 8px",
+        borderRadius: "999px",
+        border: `1px solid ${tone.border}`,
+        backgroundColor: tone.background,
+        color: tone.label,
+        fontSize: "10px",
+        fontWeight: 700,
+      }}
+    >
+      <span>{family.label}</span>
+      <span style={{ color: tone.value }}>{formatSourceFamilyDetail(family)}</span>
+    </span>
+  );
+}
+
+function SourceKindBadge({ kind }: { kind: IntuneLogSourceKind }) {
+  const tone = getSourceKindTone(kind);
+
+  return (
+    <span
+      style={{
+        fontSize: "10px",
+        padding: "2px 6px",
+        borderRadius: "999px",
+        border: `1px solid ${tone.border}`,
+        backgroundColor: tone.background,
+        color: tone.label,
+        fontWeight: 700,
+      }}
+    >
+      {getIntuneSourceKindLabel(kind)}
+    </span>
+  );
+}
+
 function CoverageRow({ file }: { file: IntuneDiagnosticsFileCoverage }) {
   const hasActivity = file.eventCount > 0 || file.downloadCount > 0;
+  const sourceKind = getIntuneSourceKind(file.filePath);
 
   return (
     <div
@@ -1168,6 +1246,7 @@ function CoverageRow({ file }: { file: IntuneDiagnosticsFileCoverage }) {
           {getFileName(file.filePath)}
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", marginTop: "4px" }}>
+          <SourceKindBadge kind={sourceKind} />
           <RowStat label="Events" value={file.eventCount} color="#2563eb" />
           <RowStat label="Downloads" value={file.downloadCount} color="#ea580c" />
           {file.rotationGroup && (
@@ -1400,274 +1479,11 @@ function matchesTimelineAction(
   return true;
 }
 
-function buildDerivedCoverage(
-  sourceFiles: string[],
-  events: IntuneEvent[],
-  downloads: DownloadStat[]
-): IntuneDiagnosticsCoverage {
-  const filePaths = new Set<string>(sourceFiles);
-  for (const event of events) {
-    filePaths.add(event.sourceFile);
-  }
-
-  const eventCounts = new Map<string, number>();
-  const fileEvents = new Map<string, IntuneEvent[]>();
-  for (const event of events) {
-    eventCounts.set(event.sourceFile, (eventCounts.get(event.sourceFile) ?? 0) + 1);
-    const existing = fileEvents.get(event.sourceFile);
-    if (existing) {
-      existing.push(event);
-    } else {
-      fileEvents.set(event.sourceFile, [event]);
-    }
-  }
-
-  const rotationEntries = Array.from(filePaths).map((filePath) => ({
-    filePath,
-    rotation: detectRotationMetadata(filePath),
-  }));
-  const rotationCounts = new Map<string, number>();
-  for (const entry of rotationEntries) {
-    if (entry.rotation.rotationGroup) {
-      rotationCounts.set(
-        entry.rotation.rotationGroup,
-        (rotationCounts.get(entry.rotation.rotationGroup) ?? 0) + 1
-      );
-    }
-  }
-
-  const files = rotationEntries
-    .map(({ filePath, rotation }) => {
-      const groupedEvents = fileEvents.get(filePath) ?? [];
-      const timestampBounds = buildTimestampBounds(groupedEvents, []);
-      const rotationGroup =
-        rotation.rotationGroup && (rotationCounts.get(rotation.rotationGroup) ?? 0) > 1
-          ? rotation.rotationGroup
-          : null;
-
-      return {
-        filePath,
-        eventCount: eventCounts.get(filePath) ?? 0,
-        downloadCount: 0,
-        timestampBounds,
-        isRotatedSegment: rotationGroup != null ? rotation.isRotatedSegment : false,
-        rotationGroup,
-      } satisfies IntuneDiagnosticsFileCoverage;
-    })
-    .sort((left, right) => {
-      const leftActivity = left.eventCount + left.downloadCount;
-      const rightActivity = right.eventCount + right.downloadCount;
-      return rightActivity - leftActivity || left.filePath.localeCompare(right.filePath);
-    });
-
-  const overallTimestampBounds = buildTimestampBounds(events, downloads);
-  const mergedTimestampBounds = mergeTimestampBounds([
-    ...files
-      .map((file) => file.timestampBounds)
-      .filter((value): value is IntuneTimestampBounds => value != null),
-    ...(overallTimestampBounds ? [overallTimestampBounds] : []),
-  ]);
-
-  return {
-    files,
-    timestampBounds: mergedTimestampBounds,
-    hasRotatedLogs: files.some((file) => file.rotationGroup != null),
-    dominantSource: buildDominantSource(files, events),
-  };
-}
-
 function buildDominantSourceLabel(
   dominantSource: NonNullable<IntuneDiagnosticsCoverage["dominantSource"]>
 ): string {
   const share = dominantSource.eventShare != null ? ` (${formatEventShare(dominantSource.eventShare)})` : "";
   return `${getFileName(dominantSource.filePath)}${share}`;
-}
-
-function buildDerivedConfidence(
-  summary: IntuneSummary,
-  coverage: IntuneDiagnosticsCoverage,
-  repeatedFailures: IntuneRepeatedFailureGroup[],
-  events: IntuneEvent[]
-): IntuneDiagnosticsConfidence {
-  if (summary.totalEvents === 0 && summary.totalDownloads === 0) {
-    return {
-      level: "Unknown",
-      score: null,
-      reasons: ["No Intune events or download evidence were available."],
-    };
-  }
-
-  let score = 0.15;
-  const reasons: string[] = [];
-  const failedEvents = events.filter((event) => event.status === "Failed" || event.status === "Timeout").length;
-  const distinctKinds = distinctSourceKinds(coverage.files);
-  const contributingFiles = coverage.files.filter((file) => file.eventCount > 0 || file.downloadCount > 0).length;
-
-  if (summary.totalEvents >= 20) {
-    score += 0.25;
-    reasons.push(`${summary.totalEvents} events were extracted across the selected logs.`);
-  } else if (summary.totalEvents >= 8) {
-    score += 0.15;
-    reasons.push(`${summary.totalEvents} events were extracted across the selected logs.`);
-  } else if (summary.totalEvents > 0) {
-    score += 0.05;
-    reasons.push(`Only ${summary.totalEvents} event(s) were extracted, so the evidence set is narrow.`);
-  }
-
-  if (failedEvents >= 4) {
-    score += 0.2;
-    reasons.push(`${failedEvents} failed or timed-out event(s) were available for review.`);
-  } else if (failedEvents > 0) {
-    score += 0.1;
-    reasons.push(`${failedEvents} failed or timed-out event(s) were available for review.`);
-  }
-
-  if (distinctKinds >= 3) {
-    score += 0.2;
-    reasons.push(`Evidence spans ${distinctKinds} distinct Intune log families.`);
-  } else if (distinctKinds === 2) {
-    score += 0.1;
-    reasons.push("Evidence spans two distinct Intune log families.");
-  }
-
-  if (coverage.timestampBounds) {
-    score += 0.1;
-    reasons.push("Parsed timestamps were available for the overall diagnostics window.");
-  }
-
-  if (repeatedFailures.length > 0) {
-    score += 0.15;
-    reasons.push(`${repeatedFailures.length} repeated failure group(s) were identified deterministically.`);
-  }
-
-  if (coverage.hasRotatedLogs) {
-    score += 0.05;
-    reasons.push("Rotated log segments were available, which improves continuity across retries.");
-  }
-
-  if (contributingFiles <= 1) {
-    score -= 0.15;
-    reasons.push("Evidence comes from a single contributing source file.");
-  }
-
-  if (coverage.files.some((file) => (file.eventCount > 0 || file.downloadCount > 0) && file.timestampBounds == null)) {
-    score -= 0.1;
-    reasons.push("Some contributing files had no parseable timestamps, which weakens ordering confidence.");
-  }
-
-  if (summary.totalEvents === 0 && summary.totalDownloads > 0) {
-    score -= 0.2;
-    reasons.push("Only download statistics were available; no correlated Intune events were extracted.");
-  }
-
-  if (summary.inProgress + summary.pending > summary.failed + summary.succeeded && summary.totalEvents > 0) {
-    score -= 0.1;
-    reasons.push("Most observed work is still pending or in progress, so the failure picture may be incomplete.");
-  }
-
-  if (hasAppOrDownloadFailures(events) && !hasSourceKind(coverage.files, "appworkload")) {
-    score -= 0.15;
-    reasons.push("AppWorkload evidence was not available for app or download failures.");
-  }
-
-  if (hasPolicyFailures(events) && !hasSourceKind(coverage.files, "appactionprocessor")) {
-    score -= 0.15;
-    reasons.push("AppActionProcessor evidence was not available for applicability or policy failures.");
-  }
-
-  if (hasScriptFailures(events) && !hasSourceKind(coverage.files, "agentexecutor") && !hasSourceKind(coverage.files, "healthscripts")) {
-    score -= 0.15;
-    reasons.push("AgentExecutor or HealthScripts evidence was not available for script-related failures.");
-  }
-
-  score = Math.max(0, Math.min(1, score));
-
-  return {
-    level: score >= 0.75 ? "High" : score >= 0.45 ? "Medium" : "Low",
-    score: Math.round(score * 1000) / 1000,
-    reasons,
-  };
-}
-
-function buildDerivedRepeatedFailures(events: IntuneEvent[]): IntuneRepeatedFailureGroup[] {
-  const groups = new Map<
-    string,
-    {
-      name: string;
-      eventType: IntuneEventType;
-      errorCode: string | null;
-      occurrences: number;
-      sourceFiles: Set<string>;
-      sampleEventIds: number[];
-      earliest: string | null;
-      latest: string | null;
-      reasonDisplay: string;
-    }
-  >();
-
-  for (const event of events) {
-    if (event.status !== "Failed" && event.status !== "Timeout") {
-      continue;
-    }
-
-    const reason = normalizeFailureReason(event);
-    const subjectKey = event.guid ?? normalizeIdentifier(event.name);
-    const key = `${event.eventType}|${subjectKey}|${reason.key}`;
-    const existing = groups.get(key);
-
-    if (existing) {
-      existing.occurrences += 1;
-      existing.sourceFiles.add(event.sourceFile);
-      if (existing.sampleEventIds.length < 5) {
-        existing.sampleEventIds.push(event.id);
-      }
-      if (event.name.length < existing.name.length) {
-        existing.name = event.name;
-      }
-      if (!existing.errorCode && event.errorCode) {
-        existing.errorCode = event.errorCode;
-      }
-      const timestamp = event.startTime ?? event.endTime;
-      if (timestamp) {
-        existing.earliest = pickEarlierTimestamp(existing.earliest, timestamp);
-        existing.latest = pickLaterTimestamp(existing.latest, timestamp);
-      }
-      continue;
-    }
-
-    const timestamp = event.startTime ?? event.endTime;
-    groups.set(key, {
-      name: event.name,
-      eventType: event.eventType,
-      errorCode: event.errorCode,
-      occurrences: 1,
-      sourceFiles: new Set([event.sourceFile]),
-      sampleEventIds: [event.id],
-      earliest: timestamp,
-      latest: timestamp,
-      reasonDisplay: reason.display,
-    });
-  }
-
-  return Array.from(groups.entries())
-    .filter(([, group]) => group.occurrences >= 2)
-    .map(([key, group]) => ({
-      id: `repeated-${normalizeIdentifier(key)}`,
-      name: `${group.name}: ${group.reasonDisplay}`,
-      eventType: group.eventType,
-      errorCode: group.errorCode,
-      occurrences: group.occurrences,
-      timestampBounds:
-        group.earliest && group.latest
-          ? {
-            firstTimestamp: group.earliest,
-            lastTimestamp: group.latest,
-          }
-          : null,
-      sourceFiles: Array.from(group.sourceFiles).sort((left, right) => left.localeCompare(right)),
-      sampleEventIds: group.sampleEventIds,
-    }))
-    .sort((left, right) => right.occurrences - left.occurrences || left.name.localeCompare(right.name));
 }
 
 function buildRepeatedFailureConclusion(group: IntuneRepeatedFailureGroup): string {
@@ -1681,271 +1497,174 @@ function buildRepeatedFailureConclusion(group: IntuneRepeatedFailureGroup): stri
   return subject;
 }
 
-function normalizeFailureReason(event: IntuneEvent): { key: string; display: string } {
-  if (event.errorCode) {
-    return {
-      key: `code-${normalizeIdentifier(event.errorCode)}`,
-      display: event.errorCode,
+function buildSourceFamilySummary(
+  files: IntuneDiagnosticsFileCoverage[]
+): IntuneSourceFamilySummary[] {
+  const families = new Map<IntuneLogSourceKind, IntuneSourceFamilySummary>();
+
+  for (const file of files) {
+    const kind = getIntuneSourceKind(file.filePath);
+    const existing = families.get(kind) ?? {
+      kind,
+      label: getIntuneSourceKindLabel(kind),
+      fileCount: 0,
+      contributingFileCount: 0,
+      eventCount: 0,
+      downloadCount: 0,
     };
-  }
 
-  const detail = event.detail.toLowerCase();
-  const patterns: Array<[string, string]> = [
-    ["access is denied", "access is denied"],
-    ["permission denied", "permission denied"],
-    ["unauthorized", "unauthorized"],
-    ["not applicable", "not applicable"],
-    ["will not be enforced", "will not be enforced"],
-    ["requirement rule", "requirement rule blocked enforcement"],
-    ["detection rule", "detection rule blocked enforcement"],
-    ["hash validation failed", "hash validation failed"],
-    ["hash mismatch", "hash mismatch"],
-    ["timed out", "operation timed out"],
-    ["timeout", "operation timed out"],
-  ];
-
-  for (const [pattern, label] of patterns) {
-    if (detail.includes(pattern)) {
-      return {
-        key: normalizeIdentifier(label),
-        display: label,
-      };
+    existing.fileCount += 1;
+    existing.eventCount += file.eventCount;
+    existing.downloadCount += file.downloadCount;
+    if (file.eventCount > 0 || file.downloadCount > 0) {
+      existing.contributingFileCount += 1;
     }
+
+    families.set(kind, existing);
   }
 
-  const compactDetail = event.detail.trim().replace(/\s+/g, " ");
-  const fallback = compactDetail.length > 72 ? `${compactDetail.slice(0, 69)}...` : compactDetail;
-  return {
-    key: normalizeIdentifier(fallback || event.status),
-    display: fallback || event.status,
-  };
+  return Array.from(families.values()).sort((left, right) => {
+    const leftSignals = left.eventCount + left.downloadCount;
+    const rightSignals = right.eventCount + right.downloadCount;
+    return (
+      right.contributingFileCount - left.contributingFileCount ||
+      rightSignals - leftSignals ||
+      right.fileCount - left.fileCount ||
+      left.label.localeCompare(right.label)
+    );
+  });
 }
 
-function buildTimestampBounds(
-  events: IntuneEvent[],
-  downloads: DownloadStat[]
-): IntuneTimestampBounds | null {
-  const timestamps = [
-    ...events.flatMap((event) => [event.startTime, event.endTime]),
-    ...downloads.map((download) => download.timestamp),
-  ].filter((value): value is string => Boolean(value));
-
-  let earliest: string | null = null;
-  let latest: string | null = null;
-  for (const timestamp of timestamps) {
-    earliest = pickEarlierTimestamp(earliest, timestamp);
-    latest = pickLaterTimestamp(latest, timestamp);
+function formatSourceFamilyDetail(family: IntuneSourceFamilySummary): string {
+  const parts: string[] = [];
+  if (family.eventCount > 0) {
+    parts.push(`${family.eventCount} event${family.eventCount === 1 ? "" : "s"}`);
+  }
+  if (family.downloadCount > 0) {
+    parts.push(`${family.downloadCount} download${family.downloadCount === 1 ? "" : "s"}`);
+  }
+  if (parts.length > 0) {
+    return parts.join(" • ");
   }
 
-  if (!earliest || !latest) {
-    return null;
-  }
-
-  return {
-    firstTimestamp: earliest,
-    lastTimestamp: latest,
-  };
+  return `${family.fileCount} file${family.fileCount === 1 ? "" : "s"}`;
 }
 
-function mergeTimestampBounds(boundsList: IntuneTimestampBounds[]): IntuneTimestampBounds | null {
-  let earliest: string | null = null;
-  let latest: string | null = null;
+function getIntuneSourceKind(filePath: string): IntuneLogSourceKind {
+  const fileName = getFileName(filePath).toLowerCase();
 
-  for (const bounds of boundsList) {
-    if (bounds.firstTimestamp) {
-      earliest = pickEarlierTimestamp(earliest, bounds.firstTimestamp);
-    }
-    if (bounds.lastTimestamp) {
-      latest = pickLaterTimestamp(latest, bounds.lastTimestamp);
-    }
-  }
-
-  if (!earliest || !latest) {
-    return null;
-  }
-
-  return {
-    firstTimestamp: earliest,
-    lastTimestamp: latest,
-  };
-}
-
-function buildDominantSource(
-  files: IntuneDiagnosticsFileCoverage[],
-  events: IntuneEvent[]
-): IntuneDiagnosticsCoverage["dominantSource"] {
-  const totalEvents = events.length;
-  const scores = new Map<string, number>();
-
-  for (const event of events) {
-    scores.set(event.sourceFile, (scores.get(event.sourceFile) ?? 0) + eventSignalScore(event));
-  }
-
-  const rankedFiles = files
-    .map((file) => ({ file, score: scores.get(file.filePath) ?? 0 }))
-    .filter((entry) => entry.score > 0)
-    .sort((left, right) => {
-      return (
-        right.score - left.score ||
-        right.file.eventCount - left.file.eventCount ||
-        right.file.downloadCount - left.file.downloadCount ||
-        left.file.filePath.localeCompare(right.file.filePath)
-      );
-    });
-
-  const best = rankedFiles[0];
-  if (!best) {
-    return null;
-  }
-
-  return {
-    filePath: best.file.filePath,
-    eventCount: best.file.eventCount,
-    eventShare: totalEvents > 0 ? best.file.eventCount / totalEvents : null,
-  };
-}
-
-function eventSignalScore(event: IntuneEvent): number {
-  const statusWeight =
-    event.status === "Failed" || event.status === "Timeout"
-      ? 5
-      : event.status === "Success"
-        ? 2
-        : 1;
-  const typeWeight =
-    event.eventType === "ContentDownload"
-      ? 4
-      : event.eventType === "Win32App" || event.eventType === "WinGetApp"
-        ? 4
-        : event.eventType === "PowerShellScript" || event.eventType === "Remediation"
-          ? 4
-          : event.eventType === "PolicyEvaluation"
-            ? 3
-            : 1;
-  const errorWeight = event.errorCode ? 1 : 0;
-  return statusWeight + typeWeight + errorWeight;
-}
-
-function distinctSourceKinds(files: IntuneDiagnosticsFileCoverage[]): number {
-  return new Set(
-    files
-      .filter((file) => file.eventCount > 0 || file.downloadCount > 0)
-      .map((file) => sourceKindKey(file.filePath))
-  ).size;
-}
-
-function hasSourceKind(files: IntuneDiagnosticsFileCoverage[], kind: string): boolean {
-  return files.some(
-    (file) => (file.eventCount > 0 || file.downloadCount > 0) && sourceKindKey(file.filePath) === kind
-  );
-}
-
-function sourceKindKey(filePath: string): string {
-  const name = getFileName(filePath).toLowerCase();
-  if (name.includes("appworkload")) {
+  if (fileName.includes("appworkload")) {
     return "appworkload";
   }
-  if (name.includes("appactionprocessor")) {
+  if (fileName.includes("appactionprocessor")) {
     return "appactionprocessor";
   }
-  if (name.includes("agentexecutor")) {
+  if (fileName.includes("agentexecutor")) {
     return "agentexecutor";
   }
-  if (name.includes("healthscripts")) {
+  if (fileName.includes("healthscripts")) {
     return "healthscripts";
   }
-  if (name.includes("intunemanagementextension")) {
+  if (fileName.includes("clienthealth")) {
+    return "clienthealth";
+  }
+  if (fileName.includes("clientcertcheck")) {
+    return "clientcertcheck";
+  }
+  if (fileName.includes("devicehealthmonitoring")) {
+    return "devicehealthmonitoring";
+  }
+  if (fileName.includes("sensor")) {
+    return "sensor";
+  }
+  if (fileName.includes("win32appinventory")) {
+    return "win32appinventory";
+  }
+  if (fileName.includes("intunemanagementextension")) {
     return "intunemanagementextension";
   }
   return "other";
 }
 
-function hasAppOrDownloadFailures(events: IntuneEvent[]): boolean {
-  return events.some(
-    (event) =>
-      (event.status === "Failed" || event.status === "Timeout") &&
-      (event.eventType === "Win32App" || event.eventType === "WinGetApp" || event.eventType === "ContentDownload")
-  );
+function getIntuneSourceKindLabel(kind: IntuneLogSourceKind): string {
+  switch (kind) {
+    case "appworkload":
+      return "AppWorkload";
+    case "appactionprocessor":
+      return "AppActionProcessor";
+    case "agentexecutor":
+      return "AgentExecutor";
+    case "healthscripts":
+      return "HealthScripts";
+    case "clienthealth":
+      return "ClientHealth";
+    case "clientcertcheck":
+      return "ClientCertCheck";
+    case "devicehealthmonitoring":
+      return "DeviceHealthMonitoring";
+    case "sensor":
+      return "Sensor";
+    case "win32appinventory":
+      return "Win32AppInventory";
+    case "intunemanagementextension":
+      return "IME core";
+    case "other":
+    default:
+      return "Other IME";
+  }
 }
 
-function hasPolicyFailures(events: IntuneEvent[]): boolean {
-  return events.some(
-    (event) =>
-      (event.status === "Failed" || event.status === "Timeout") && event.eventType === "PolicyEvaluation"
-  );
-}
-
-function hasScriptFailures(events: IntuneEvent[]): boolean {
-  return events.some(
-    (event) =>
-      (event.status === "Failed" || event.status === "Timeout") &&
-      (event.eventType === "PowerShellScript" || event.eventType === "Remediation")
-  );
-}
-
-function detectRotationMetadata(filePath: string): {
-  isRotatedSegment: boolean;
-  rotationGroup: string | null;
-} {
-  const fileName = getFileName(filePath);
-  const stem = fileName.replace(/\.[^.]+$/, "");
-
-  for (const separator of [".", "-", "_"]) {
-    const index = stem.lastIndexOf(separator);
-    if (index > 0) {
-      const base = stem.slice(0, index);
-      const suffix = stem.slice(index + 1);
-      if (isRotationSuffix(suffix)) {
-        return {
-          isRotatedSegment: true,
-          rotationGroup: base.toLowerCase(),
-        };
-      }
-    }
+function getSourceKindTone(kind: IntuneLogSourceKind) {
+  switch (kind) {
+    case "appworkload":
+      return {
+        border: "#fdba74",
+        background: "#fff7ed",
+        label: "#9a3412",
+        value: "#c2410c",
+      };
+    case "appactionprocessor":
+      return {
+        border: "#93c5fd",
+        background: "#eff6ff",
+        label: "#1d4ed8",
+        value: "#1e40af",
+      };
+    case "agentexecutor":
+    case "healthscripts":
+      return {
+        border: "#86efac",
+        background: "#f0fdf4",
+        label: "#166534",
+        value: "#15803d",
+      };
+    case "clientcertcheck":
+    case "devicehealthmonitoring":
+      return {
+        border: "#fca5a5",
+        background: "#fef2f2",
+        label: "#b91c1c",
+        value: "#991b1b",
+      };
+    case "sensor":
+    case "win32appinventory":
+      return {
+        border: "#67e8f9",
+        background: "#ecfeff",
+        label: "#0f766e",
+        value: "#0f766e",
+      };
+    case "clienthealth":
+    case "intunemanagementextension":
+    case "other":
+    default:
+      return {
+        border: "#cbd5e1",
+        background: "#f8fafc",
+        label: "#475569",
+        value: "#334155",
+      };
   }
-
-  return {
-    isRotatedSegment: false,
-    rotationGroup: stem ? stem.toLowerCase() : null,
-  };
-}
-
-function isRotationSuffix(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-  if (/^\d+$/.test(normalized)) {
-    return true;
-  }
-  if (normalized.startsWith("lo_") || normalized === "bak" || normalized === "old") {
-    return true;
-  }
-  return /^\d{8}$/.test(normalized);
-}
-
-function pickEarlierTimestamp(current: string | null, candidate: string): string {
-  if (!current) {
-    return candidate;
-  }
-  const currentValue = Date.parse(current);
-  const candidateValue = Date.parse(candidate);
-  if (Number.isNaN(currentValue) || Number.isNaN(candidateValue)) {
-    return candidate.localeCompare(current) < 0 ? candidate : current;
-  }
-  return candidateValue < currentValue ? candidate : current;
-}
-
-function pickLaterTimestamp(current: string | null, candidate: string): string {
-  if (!current) {
-    return candidate;
-  }
-  const currentValue = Date.parse(current);
-  const candidateValue = Date.parse(candidate);
-  if (Number.isNaN(currentValue) || Number.isNaN(candidateValue)) {
-    return candidate.localeCompare(current) > 0 ? candidate : current;
-  }
-  return candidateValue > currentValue ? candidate : current;
 }
 
 function formatTimestampBounds(bounds: IntuneTimestampBounds): string {
@@ -2004,10 +1723,6 @@ function getConfidenceTone(level: IntuneDiagnosticsConfidence["level"]) {
         valueColor: "#334155",
       };
   }
-}
-
-function normalizeIdentifier(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }
 
 function formatEventTypeLabel(eventType: IntuneEventType): string {

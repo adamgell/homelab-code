@@ -5,8 +5,11 @@ use std::sync::Arc;
 
 use notify::{Config, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
-use crate::models::log_entry::{LogEntry, RecordFraming};
+use crate::models::log_entry::{LogEntry, ParserSpecialization, RecordFraming};
 use crate::parser::{self, ResolvedParser};
+
+const IME_RECORD_START: &str = "<![LOG[";
+const IME_RECORD_ATTRS_START: &str = "]LOG]!><";
 
 /// Manages incremental reading of a log file from a tracked byte offset.
 pub struct TailReader {
@@ -89,8 +92,18 @@ impl TailReader {
         };
 
         let lines = match self.parser_selection.record_framing {
-            RecordFraming::PhysicalLine | RecordFraming::LogicalRecord => {
+            RecordFraming::PhysicalLine => {
                 collect_complete_lines(&full_text, &mut self.pending_fragment)
+            }
+            RecordFraming::LogicalRecord => {
+                if matches!(
+                    self.parser_selection.specialization,
+                    Some(ParserSpecialization::Ime)
+                ) {
+                    collect_complete_ime_lines(&full_text, &mut self.pending_fragment)
+                } else {
+                    collect_complete_lines(&full_text, &mut self.pending_fragment)
+                }
             }
         };
 
@@ -127,6 +140,55 @@ fn collect_complete_lines<'a>(text: &'a str, pending_fragment: &mut String) -> V
     }
 
     lines
+}
+
+fn collect_complete_ime_lines<'a>(text: &'a str, pending_fragment: &mut String) -> Vec<&'a str> {
+    let cutoff = find_complete_ime_cutoff(text);
+
+    if cutoff < text.len() {
+        pending_fragment.push_str(&text[cutoff..]);
+    }
+
+    text[..cutoff].lines().collect()
+}
+
+fn find_complete_ime_cutoff(text: &str) -> usize {
+    let mut cursor = 0usize;
+
+    loop {
+        let Some(relative_start) = text[cursor..].find(IME_RECORD_START) else {
+            return cursor + complete_unmatched_tail_len(&text[cursor..]);
+        };
+
+        let record_start = cursor + relative_start;
+
+        let Some(record_end) = find_complete_ime_record_end(text, record_start) else {
+            return record_start;
+        };
+
+        cursor = record_end;
+    }
+}
+
+fn find_complete_ime_record_end(text: &str, record_start: usize) -> Option<usize> {
+    let message_start = record_start + IME_RECORD_START.len();
+    let attrs_relative_start = text[message_start..].find(IME_RECORD_ATTRS_START)?;
+    let attrs_start = message_start + attrs_relative_start + IME_RECORD_ATTRS_START.len();
+    let attrs_relative_end = text[attrs_start..].find('>')?;
+
+    Some(attrs_start + attrs_relative_end + 1)
+}
+
+fn complete_unmatched_tail_len(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+
+    if text.ends_with('\n') {
+        return text.len();
+    }
+
+    text.rfind('\n').map(|index| index + 1).unwrap_or(0)
 }
 
 /// Represents an active tail-watching session
@@ -248,7 +310,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::log_entry::LogFormat;
+    use crate::models::log_entry::{LogFormat, ParserSpecialization};
     use crate::parser;
     use crate::parser::detect::ResolvedParser;
     use crate::parser::timestamped::DateOrder;
@@ -272,7 +334,6 @@ mod tests {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/corpus/reporting_events/clean/ReportingEvents.log"
     ));
-
     fn unique_test_path(name: &str) -> PathBuf {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -423,5 +484,78 @@ mod tests {
 
             fs::remove_dir_all(root).expect("should clean up temp parity fixture");
         }
+    }
+
+    #[test]
+    fn test_tail_reader_buffers_incomplete_ime_record_until_complete() {
+        let root = hinted_test_root("ime-tail-boundary");
+        let path = hinted_test_path(
+            &root,
+            "ProgramData/Microsoft/IntuneManagementExtension/Logs/HealthScripts.log",
+        );
+        let parent = path.parent().expect("fixture path should have a parent");
+        fs::create_dir_all(parent).expect("should create temporary parser hint directories");
+
+        let initial = "<![LOG[Powershell execution is done, exitCode = 1]LOG]!><time=\"11:16:37.3093207\" date=\"3-12-2026\" component=\"HealthScripts\" context=\"\" type=\"1\" thread=\"50\" file=\"\">\n";
+        fs::write(&path, initial).expect("should write initial fixture chunk");
+
+        let path_str = path.to_string_lossy().to_string();
+        let (initial_result, selection) =
+            parser::parse_file(&path_str).expect("initial fixture should parse");
+
+        assert_eq!(selection.specialization, Some(ParserSpecialization::Ime));
+
+        let mut reader = TailReader::new(
+            path.clone(),
+            initial_result.byte_offset,
+            selection,
+            initial_result.entries.len() as u64,
+            initial_result.total_lines + 1,
+        );
+
+        let partial_append = concat!(
+            "<![LOG[[HS] err output = Downloaded profile payload is not valid JSON.\n",
+            "At C:\\Windows\\IMECache\\HealthScripts\\script.ps1:457 char:9\n"
+        );
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("should reopen temp file");
+        write!(file, "{}", partial_append).expect("should append partial IME record");
+        drop(file);
+
+        let partial_entries = reader
+            .read_new_entries()
+            .expect("partial IME tail read should succeed");
+
+        assert!(partial_entries.is_empty());
+
+        let mut file = OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("should reopen temp file");
+        write!(
+            file,
+            "{}",
+            "]LOG]!><time=\"11:16:42.3322734\" date=\"3-12-2026\" component=\"HealthScripts\" context=\"\" type=\"3\" thread=\"50\" file=\"\">\n"
+        )
+        .expect("should append IME record terminator");
+        drop(file);
+
+        let tail_entries = reader
+            .read_new_entries()
+            .expect("complete IME tail read should succeed");
+        let (full_result, _) = parser::parse_file(&path_str).expect("full fixture should parse");
+
+        assert_eq!(tail_entries.len(), 1);
+        assert_entries_match(&tail_entries[0], &full_result.entries[1]);
+
+        let repeat_entries = reader
+            .read_new_entries()
+            .expect("subsequent IME tail read should succeed");
+        assert!(repeat_entries.is_empty());
+
+        fs::remove_dir_all(root).expect("should clean up temp IME fixture");
     }
 }

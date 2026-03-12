@@ -161,6 +161,52 @@ static COMPLIANCE_TRUE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)compliance\s+result.*\bis\s+true\b"#).unwrap());
 static COMPLIANCE_FALSE_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r#"(?i)compliance\s+result.*\bis\s+false\b"#).unwrap());
+static CLIENT_HEALTH_RULE_SUMMARY_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)summary:\s*rule\s+(.+?)\s+with\s+ID\s+[0-9a-f-]{36},\s*result\s*=\s*(pass|fail),\s*details\s*=\s*(.+)$"#,
+    )
+    .unwrap()
+});
+static CLIENT_HEALTH_HEARTBEAT_SUCCESS_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)the client health report was sent successfully\. done\."#).unwrap()
+});
+static CLIENT_HEALTH_HEARTBEAT_FAILURE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:failed to send heartbeat report|exception occurred while sending heartbeat report|clienthealthruleengine\]\(sendheartbeatreport\).*(?:failed|unauthorized|exception)|found webexception in aggregateexception)"#,
+    )
+    .unwrap()
+});
+static CLIENT_CERT_LOCAL_MACHINE_COUNT_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)MDM certs found in LocalMachine count:\s*(\d+)"#).unwrap());
+static CLIENT_CERT_FAILURE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:certificate.*(?:invalid|error|fail)|private key|correct oid|expired|client cert check.*exception|exception.*certificate)"#,
+    )
+    .unwrap()
+});
+static DEVICE_HEALTH_APP_CRASH_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?is)received application event.*?<Data Name="AppName">([^<]+)</Data>.*?<Data Name="ExceptionCode">([^<]+)</Data>"#,
+    )
+    .unwrap()
+});
+static SENSOR_MEMORY_FAILURE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)(?:error getting physically installed system memory|GetPhysicallyInstalledSystemMemory failed)"#,
+    )
+    .unwrap()
+});
+static WIN32_APP_INVENTORY_FULL_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"(?i)\[Win32AppInventory\]\s*report type is 1\b"#).unwrap());
+static WIN32_APP_INVENTORY_NO_CHANGE_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?i)no change detected in win32 app inventory delta update"#).unwrap()
+});
+static WIN32_APP_INVENTORY_DELTA_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?i)computing delta inventory\.\.\.done\.\s*add count\s*=\s*(\d+),\s*modify count\s*=\s*(\d+),\s*delete count\s*=\s*(\d+)"#,
+    )
+    .unwrap()
+});
 static SUCCESS_RE: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
         r#"(?i)(?:success|succeeded|completed\s+successfully|installed|detected|compliant|validated|passed)"#,
@@ -181,7 +227,59 @@ enum ImeSourceKind {
     AppActionProcessor,
     AgentExecutor,
     HealthScripts,
+    ClientHealth,
+    ClientCertCheck,
+    DeviceHealthMonitoring,
+    Sensor,
+    Win32AppInventory,
     Other,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct AppWorkloadMatchFlags {
+    winget_token: bool,
+    winget: bool,
+    download: bool,
+    staging: bool,
+    hash: bool,
+    install: bool,
+    retry: bool,
+    stall: bool,
+    failure: bool,
+    success: bool,
+    queue: bool,
+    pending: bool,
+    timeout: bool,
+}
+
+impl AppWorkloadMatchFlags {
+    fn from_message(msg: &str) -> Self {
+        Self {
+            winget_token: WINGET_TOKEN_RE.is_match(msg),
+            winget: WINGET_RE.is_match(msg),
+            download: APPWORKLOAD_DOWNLOAD_RE.is_match(msg),
+            staging: APPWORKLOAD_STAGING_RE.is_match(msg),
+            hash: APPWORKLOAD_HASH_RE.is_match(msg),
+            install: APPWORKLOAD_INSTALL_RE.is_match(msg),
+            retry: APPWORKLOAD_RETRY_RE.is_match(msg),
+            stall: APPWORKLOAD_STALL_RE.is_match(msg),
+            failure: APPWORKLOAD_FAILURE_RE.is_match(msg),
+            success: APPWORKLOAD_SUCCESS_RE.is_match(msg),
+            queue: APPWORKLOAD_QUEUE_RE.is_match(msg),
+            pending: PENDING_RE.is_match(msg),
+            timeout: TIMEOUT_RE.is_match(msg),
+        }
+    }
+
+    fn is_candidate(self) -> bool {
+        self.download
+            || self.staging
+            || self.install
+            || self.retry
+            || self.stall
+            || self.winget_token
+            || self.winget
+    }
 }
 
 pub fn extract_events(lines: &[ImeLine], source_file: &str) -> Vec<IntuneEvent> {
@@ -190,6 +288,14 @@ pub fn extract_events(lines: &[ImeLine], source_file: &str) -> Vec<IntuneEvent> 
     let source_kind = classify_source_kind(source_file);
 
     for line in lines {
+        if source_kind == ImeSourceKind::AppWorkload {
+            if let Some(event) = extract_appworkload_event(line, source_file, next_id) {
+                events.push(event);
+                next_id += 1;
+            }
+            continue;
+        }
+
         let Some(event_type) = detect_event_type(&line.message, source_kind) else {
             continue;
         };
@@ -224,6 +330,120 @@ pub fn extract_events(lines: &[ImeLine], source_file: &str) -> Vec<IntuneEvent> 
     events
 }
 
+fn extract_appworkload_event(
+    line: &ImeLine,
+    source_file: &str,
+    next_id: u64,
+) -> Option<IntuneEvent> {
+    let msg = line.message.as_str();
+    if contains_any_ascii_case_insensitive(
+        msg,
+        &[
+            "reportingmanager",
+            "reportingcachemanager",
+            "reporting state initialized",
+            "sending reports",
+            "writeabletostorage",
+            "cangenerate",
+            "isappreportable",
+        ],
+    ) {
+        return None;
+    }
+
+    let flags = AppWorkloadMatchFlags::from_message(msg);
+    if !flags.is_candidate() {
+        return None;
+    }
+
+    let event_type = if flags.winget_token || flags.winget {
+        IntuneEventType::WinGetApp
+    } else if flags.download || flags.staging || flags.retry || flags.stall {
+        IntuneEventType::ContentDownload
+    } else if flags.install {
+        IntuneEventType::Win32App
+    } else {
+        return None;
+    };
+
+    let guid = extract_guid(msg);
+    let status = determine_appworkload_status(msg, flags);
+    let name = build_appworkload_name(&event_type, &guid, msg, flags);
+
+    Some(IntuneEvent {
+        id: next_id,
+        event_type,
+        name,
+        guid,
+        status,
+        start_time: line.timestamp.clone(),
+        end_time: None,
+        duration_secs: None,
+        error_code: extract_error_code(msg),
+        detail: build_detail(msg),
+        source_file: source_file.to_string(),
+        line_number: line.line_number,
+    })
+}
+
+fn determine_appworkload_status(msg: &str, flags: AppWorkloadMatchFlags) -> IntuneStatus {
+    if flags.stall || flags.timeout {
+        IntuneStatus::Timeout
+    } else if flags.retry || flags.failure {
+        IntuneStatus::Failed
+    } else if flags.success {
+        IntuneStatus::Success
+    } else if flags.queue || flags.pending || contains_ascii_case_insensitive(msg, "pending") {
+        IntuneStatus::Pending
+    } else {
+        IntuneStatus::InProgress
+    }
+}
+
+fn build_appworkload_name(
+    event_type: &IntuneEventType,
+    guid: &Option<String>,
+    msg: &str,
+    flags: AppWorkloadMatchFlags,
+) -> String {
+    if *event_type == IntuneEventType::WinGetApp {
+        return match guid.as_deref().map(short_guid) {
+            Some(short) => format!("AppWorkload WinGet ({short}...)"),
+            None => "AppWorkload WinGet".to_string(),
+        };
+    }
+
+    let phase = if flags.stall {
+        "Download Stall"
+    } else if flags.retry {
+        "Download Retry"
+    } else if flags.hash {
+        "Hash Validation"
+    } else if flags.staging {
+        "Staging"
+    } else if flags.install {
+        "Install"
+    } else if flags.download {
+        "Download"
+    } else {
+        return build_event_name(event_type, guid, msg, ImeSourceKind::AppWorkload);
+    };
+
+    match guid.as_deref().map(short_guid) {
+        Some(short) => format!("AppWorkload {phase} ({short}...)"),
+        None => format!("AppWorkload {phase}"),
+    }
+}
+
+fn build_detail(msg: &str) -> String {
+    if msg.len() > 300 {
+        let end = msg.floor_char_boundary(300);
+        format!("{}...", &msg[..end])
+    } else {
+        msg.to_string()
+    }
+}
+
 fn classify_source_kind(source_file: &str) -> ImeSourceKind {
     let file_name = Path::new(source_file)
         .file_name()
@@ -238,6 +458,16 @@ fn classify_source_kind(source_file: &str) -> ImeSourceKind {
         ImeSourceKind::AgentExecutor
     } else if file_name.contains("healthscripts") {
         ImeSourceKind::HealthScripts
+    } else if file_name.contains("clienthealth") {
+        ImeSourceKind::ClientHealth
+    } else if file_name.contains("clientcertcheck") {
+        ImeSourceKind::ClientCertCheck
+    } else if file_name.contains("devicehealthmonitoring") {
+        ImeSourceKind::DeviceHealthMonitoring
+    } else if file_name.contains("sensor") {
+        ImeSourceKind::Sensor
+    } else if file_name.contains("win32appinventory") {
+        ImeSourceKind::Win32AppInventory
     } else if file_name.contains("intunemanagementextension") {
         ImeSourceKind::PrimaryIme
     } else {
@@ -295,6 +525,31 @@ fn detect_event_type(msg: &str, source_kind: ImeSourceKind) -> Option<IntuneEven
                 return Some(IntuneEventType::Remediation);
             }
         }
+        ImeSourceKind::ClientHealth => {
+            if is_client_health_event_candidate(msg) {
+                return Some(IntuneEventType::Other);
+            }
+        }
+        ImeSourceKind::ClientCertCheck => {
+            if is_client_cert_check_event_candidate(msg) {
+                return Some(IntuneEventType::Other);
+            }
+        }
+        ImeSourceKind::DeviceHealthMonitoring => {
+            if DEVICE_HEALTH_APP_CRASH_RE.is_match(msg) {
+                return Some(IntuneEventType::Other);
+            }
+        }
+        ImeSourceKind::Sensor => {
+            if SENSOR_MEMORY_FAILURE_RE.is_match(msg) {
+                return Some(IntuneEventType::Other);
+            }
+        }
+        ImeSourceKind::Win32AppInventory => {
+            if is_win32_app_inventory_event_candidate(msg) {
+                return Some(IntuneEventType::Other);
+            }
+        }
         ImeSourceKind::PrimaryIme | ImeSourceKind::Other => {}
     }
 
@@ -316,41 +571,54 @@ fn detect_event_type(msg: &str, source_kind: ImeSourceKind) -> Option<IntuneEven
 }
 
 fn is_agent_executor_event_candidate(msg: &str) -> bool {
-    let normalized = msg.to_ascii_lowercase();
-    if normalized.ends_with(".timeout")
-        || normalized.ends_with("quotedtimeoutfilepath.txt")
-        || normalized.contains("prepare to run powershell script")
-        || normalized.contains("remediation script option gets invoked")
-        || normalized.contains("creating command line parser")
-        || normalized.contains("adding argument")
-        || normalized.contains("powershell path is")
+    if ends_with_ascii_case_insensitive(msg, ".timeout")
+        || ends_with_ascii_case_insensitive(msg, "quotedtimeoutfilepath.txt")
+        || contains_any_ascii_case_insensitive(
+            msg,
+            &[
+                "prepare to run powershell script",
+                "remediation script option gets invoked",
+                "creating command line parser",
+                "adding argument",
+                "powershell path is",
+            ],
+        )
     {
         return false;
     }
 
-    normalized.contains("powershell exit code")
-        || normalized.contains("powershell script is successfully executed")
-        || normalized.contains("detection script")
-        || normalized.contains("remediation script")
-        || normalized.contains("script completed")
-        || normalized.contains("script failed")
-        || normalized.contains("script execution")
-        || normalized.contains("timed out")
-        || normalized.contains("timeout")
-        || normalized.contains("stdout")
-        || normalized.contains("stderr")
-        || normalized.contains("exit code")
+    contains_any_ascii_case_insensitive(
+        msg,
+        &[
+            "powershell exit code",
+            "powershell script is successfully executed",
+            "detection script",
+            "remediation script",
+            "script completed",
+            "script failed",
+            "script execution",
+            "timed out",
+            "timeout",
+            "stdout",
+            "stderr",
+            "exit code",
+        ],
+    )
 }
 
 fn is_appworkload_event_candidate(msg: &str) -> bool {
-    let normalized = msg.to_ascii_lowercase();
-    if normalized.contains("reportingmanager")
-        || normalized.contains("reportingcachemanager")
-        || normalized.contains("reporting state initialized")
-        || normalized.contains("sending reports")
-        || normalized.contains("writeabletostorage")
-        || normalized.contains("cangenerate")
-        || normalized.contains("isappreportable")
+    if contains_any_ascii_case_insensitive(
+        msg,
+        &[
+            "reportingmanager",
+            "reportingcachemanager",
+            "reporting state initialized",
+            "sending reports",
+            "writeabletostorage",
+            "cangenerate",
+            "isappreportable",
+        ],
+    )
     {
         return false;
     }
@@ -364,43 +632,76 @@ fn is_appworkload_event_candidate(msg: &str) -> bool {
 }
 
 fn is_app_action_processor_event_candidate(msg: &str) -> bool {
-    let normalized = msg.to_ascii_lowercase();
-    !(normalized.contains("processor initializing")
-        || (normalized.contains("found:") && normalized.contains("apps with intent"))
-        || normalized.contains("evaluating install enforcement actions for app with id")
-        || normalized.contains("no action required for app with id"))
-        && (normalized.contains("app with id:")
-            || normalized.contains("assignment evaluation")
-            || normalized.contains("targeted intent")
-            || normalized.contains("applicability =")
-            || normalized.contains("not applicable")
-            || normalized.contains("local deadline")
-            || normalized.contains("grs expired")
-            || normalized.contains("grs not expired")
-            || normalized.contains("requirement rule")
-            || normalized.contains("detection rule")
-            || normalized.contains("will not be enforced"))
+    !(contains_ascii_case_insensitive(msg, "processor initializing")
+        || (contains_ascii_case_insensitive(msg, "found:")
+            && contains_ascii_case_insensitive(msg, "apps with intent"))
+        || contains_ascii_case_insensitive(
+            msg,
+            "evaluating install enforcement actions for app with id",
+        )
+        || contains_ascii_case_insensitive(msg, "no action required for app with id"))
+        && contains_any_ascii_case_insensitive(
+            msg,
+            &[
+                "app with id:",
+                "assignment evaluation",
+                "targeted intent",
+                "applicability =",
+                "not applicable",
+                "local deadline",
+                "grs expired",
+                "grs not expired",
+                "requirement rule",
+                "detection rule",
+                "will not be enforced",
+            ],
+        )
 }
 
 fn is_healthscripts_event_candidate(msg: &str) -> bool {
-    let normalized = msg.to_ascii_lowercase();
-    if normalized.contains("inspect hourly schedule")
-        || normalized.contains("job is queued and will be scheduled")
-        || normalized.contains("completed user session")
+    if contains_any_ascii_case_insensitive(
+        msg,
+        &[
+            "inspect hourly schedule",
+            "job is queued and will be scheduled",
+            "completed user session",
+        ],
+    )
     {
         return false;
     }
 
-    normalized.contains("detection script")
-        || normalized.contains("remediation script")
-        || normalized.contains("exit code of the script")
-        || normalized.contains("compliance result")
-        || normalized.contains("pre-detect")
-        || normalized.contains("post-detect")
-        || normalized.contains("timed out")
-        || normalized.contains("timeout")
-        || normalized.contains("failed")
-        || normalized.contains("schedule")
+    contains_any_ascii_case_insensitive(
+        msg,
+        &[
+            "detection script",
+            "remediation script",
+            "exit code of the script",
+            "compliance result",
+            "pre-detect",
+            "post-detect",
+            "timed out",
+            "timeout",
+            "failed",
+            "schedule",
+        ],
+    )
+}
+
+fn is_client_health_event_candidate(msg: &str) -> bool {
+    CLIENT_HEALTH_HEARTBEAT_SUCCESS_RE.is_match(msg)
+        || CLIENT_HEALTH_HEARTBEAT_FAILURE_RE.is_match(msg)
+        || matches!(parse_client_health_summary(msg), Some((_, IntuneStatus::Failed, _)))
+}
+
+fn is_client_cert_check_event_candidate(msg: &str) -> bool {
+    parse_client_cert_local_machine_count(msg) == Some(0) || CLIENT_CERT_FAILURE_RE.is_match(msg)
+}
+
+fn is_win32_app_inventory_event_candidate(msg: &str) -> bool {
+    WIN32_APP_INVENTORY_FULL_RE.is_match(msg)
+        || WIN32_APP_INVENTORY_NO_CHANGE_RE.is_match(msg)
+        || matches!(parse_win32_app_inventory_delta(msg), Some((add, modify, delete)) if add > 0 || modify > 0 || delete > 0)
 }
 
 fn extract_guid(msg: &str) -> Option<String> {
@@ -480,6 +781,28 @@ fn determine_status(msg: &str, source_kind: ImeSourceKind) -> IntuneStatus {
                 IntuneStatus::InProgress
             }
         }
+        ImeSourceKind::ClientHealth => {
+            if let Some((_, status, _)) = parse_client_health_summary(msg) {
+                status
+            } else if CLIENT_HEALTH_HEARTBEAT_FAILURE_RE.is_match(msg) {
+                IntuneStatus::Failed
+            } else if CLIENT_HEALTH_HEARTBEAT_SUCCESS_RE.is_match(msg) {
+                IntuneStatus::Success
+            } else {
+                IntuneStatus::Unknown
+            }
+        }
+        ImeSourceKind::ClientCertCheck => {
+            if parse_client_cert_local_machine_count(msg) == Some(0)
+                || CLIENT_CERT_FAILURE_RE.is_match(msg)
+            {
+                IntuneStatus::Failed
+            } else {
+                IntuneStatus::Unknown
+            }
+        }
+        ImeSourceKind::DeviceHealthMonitoring | ImeSourceKind::Sensor => IntuneStatus::Failed,
+        ImeSourceKind::Win32AppInventory => IntuneStatus::Success,
         ImeSourceKind::PrimaryIme | ImeSourceKind::Other => {
             if TIMEOUT_RE.is_match(msg) {
                 IntuneStatus::Timeout
@@ -603,8 +926,104 @@ fn build_source_specific_name(
                 None => format!("HealthScripts {area}"),
             })
         }
+        ImeSourceKind::ClientHealth => {
+            if let Some((rule, status, details)) = parse_client_health_summary(msg) {
+                let status_label = match status {
+                    IntuneStatus::Success => "Passed",
+                    IntuneStatus::Failed => "Failed",
+                    IntuneStatus::Pending => "Pending",
+                    IntuneStatus::InProgress => "In Progress",
+                    IntuneStatus::Timeout => "Timed Out",
+                    IntuneStatus::Unknown => "Unknown",
+                };
+                let suffix = if details.eq_ignore_ascii_case("N/A") {
+                    String::new()
+                } else {
+                    format!(": {}", details.chars().take(40).collect::<String>())
+                };
+                return Some(format!("ClientHealth Rule {status_label}: {rule}{suffix}"));
+            }
+            if CLIENT_HEALTH_HEARTBEAT_FAILURE_RE.is_match(msg) {
+                Some("ClientHealth Heartbeat Failed".to_string())
+            } else if CLIENT_HEALTH_HEARTBEAT_SUCCESS_RE.is_match(msg) {
+                Some("ClientHealth Heartbeat Sent".to_string())
+            } else {
+                None
+            }
+        }
+        ImeSourceKind::ClientCertCheck => {
+            if parse_client_cert_local_machine_count(msg) == Some(0) {
+                Some("ClientCertCheck Missing MDM Certificate".to_string())
+            } else if CLIENT_CERT_FAILURE_RE.is_match(msg) {
+                Some("ClientCertCheck Validation Failure".to_string())
+            } else {
+                None
+            }
+        }
+        ImeSourceKind::DeviceHealthMonitoring => parse_device_health_app_crash(msg).map(
+            |(app_name, exception_code)| {
+                format!(
+                    "DeviceHealthMonitoring App Crash: {} ({})",
+                    app_name, exception_code
+                )
+            },
+        ),
+        ImeSourceKind::Sensor => {
+            if SENSOR_MEMORY_FAILURE_RE.is_match(msg) {
+                Some("Sensor Hardware Readiness Memory Failure".to_string())
+            } else {
+                None
+            }
+        }
+        ImeSourceKind::Win32AppInventory => {
+            if WIN32_APP_INVENTORY_FULL_RE.is_match(msg) {
+                Some("Win32AppInventory Full Inventory".to_string())
+            } else if WIN32_APP_INVENTORY_NO_CHANGE_RE.is_match(msg) {
+                Some("Win32AppInventory No Delta".to_string())
+            } else if let Some((add, modify, delete)) = parse_win32_app_inventory_delta(msg) {
+                Some(format!(
+                    "Win32AppInventory Delta (+{add} ~{modify} -{delete})"
+                ))
+            } else {
+                None
+            }
+        }
         ImeSourceKind::PrimaryIme | ImeSourceKind::Other => None,
     }
+}
+
+fn parse_client_health_summary(msg: &str) -> Option<(String, IntuneStatus, String)> {
+    let captures = CLIENT_HEALTH_RULE_SUMMARY_RE.captures(msg)?;
+    let rule = captures.get(1)?.as_str().trim().to_string();
+    let status = match captures.get(2)?.as_str().to_ascii_lowercase().as_str() {
+        "pass" => IntuneStatus::Success,
+        "fail" => IntuneStatus::Failed,
+        _ => IntuneStatus::Unknown,
+    };
+    let details = captures.get(3)?.as_str().trim().to_string();
+    Some((rule, status, details))
+}
+
+fn parse_client_cert_local_machine_count(msg: &str) -> Option<u32> {
+    CLIENT_CERT_LOCAL_MACHINE_COUNT_RE
+        .captures(msg)
+        .and_then(|cap| cap.get(1))
+        .and_then(|value| value.as_str().parse::<u32>().ok())
+}
+
+fn parse_device_health_app_crash(msg: &str) -> Option<(String, String)> {
+    let captures = DEVICE_HEALTH_APP_CRASH_RE.captures(msg)?;
+    let app_name = captures.get(1)?.as_str().trim().to_string();
+    let exception_code = captures.get(2)?.as_str().trim().to_string();
+    Some((app_name, exception_code))
+}
+
+fn parse_win32_app_inventory_delta(msg: &str) -> Option<(u32, u32, u32)> {
+    let captures = WIN32_APP_INVENTORY_DELTA_RE.captures(msg)?;
+    let add = captures.get(1)?.as_str().parse::<u32>().ok()?;
+    let modify = captures.get(2)?.as_str().parse::<u32>().ok()?;
+    let delete = captures.get(3)?.as_str().parse::<u32>().ok()?;
+    Some((add, modify, delete))
 }
 
 fn short_guid(value: &str) -> &str {
@@ -616,7 +1035,34 @@ fn short_guid(value: &str) -> &str {
 }
 
 fn contains_case_insensitive(value: &str, needle: &str) -> bool {
-    value.to_ascii_lowercase().contains(&needle.to_ascii_lowercase())
+    contains_ascii_case_insensitive(value, needle)
+}
+
+fn contains_any_ascii_case_insensitive(value: &str, needles: &[&str]) -> bool {
+    needles
+        .iter()
+        .copied()
+        .any(|needle| contains_ascii_case_insensitive(value, needle))
+}
+
+fn contains_ascii_case_insensitive(value: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if needle.len() > value.len() {
+        return false;
+    }
+
+    value
+        .as_bytes()
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
+fn ends_with_ascii_case_insensitive(value: &str, suffix: &str) -> bool {
+    value
+        .get(value.len().saturating_sub(suffix.len())..)
+        .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
 }
 
 fn pair_events(events: &mut Vec<IntuneEvent>) {
@@ -834,6 +1280,122 @@ mod tests {
     }
 
     #[test]
+    fn client_health_extracts_heartbeat_failure() {
+        let events = extract_events(
+            &[line(
+                "Failed to send heartbeat report, exception = System.NullReferenceException: Object reference not set to an instance of an object.",
+                "01-15-2024 10:00:05.000",
+                1,
+            )],
+            "C:/Logs/ClientHealth.log",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, IntuneEventType::Other);
+        assert_eq!(events[0].status, IntuneStatus::Failed);
+        assert_eq!(events[0].name, "ClientHealth Heartbeat Failed");
+    }
+
+    #[test]
+    fn client_health_ignores_passing_rule_summaries() {
+        let events = extract_events(
+            &[line(
+                "Summary: rule Verify Intune Management Extension service exists. with ID b862e7a7-fe34-47f3-a648-edd4803f781a, result = Pass, details = N/A",
+                "01-15-2024 10:00:05.000",
+                1,
+            )],
+            "C:/Logs/ClientHealth.log",
+        );
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn client_cert_check_detects_missing_local_machine_certificate() {
+        let events = extract_events(
+            &[line(
+                "MDM certs found in LocalMachine count: 0",
+                "01-15-2024 10:00:05.000",
+                1,
+            )],
+            "C:/Logs/ClientCertCheck.log",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, IntuneEventType::Other);
+        assert_eq!(events[0].status, IntuneStatus::Failed);
+        assert_eq!(events[0].name, "ClientCertCheck Missing MDM Certificate");
+    }
+
+    #[test]
+    fn device_health_monitoring_extracts_app_crash_event() {
+        let events = extract_events(
+            &[line(
+                "[datasensor] received application event, RecordId: 19583, 1000 , <![CDATA[<EventData xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">\n  <Data Name=\"AppName\">SenseNdr.exe</Data>\n  <Data Name=\"ExceptionCode\">c0000409</Data>\n</EventData>]]>",
+                "01-15-2024 10:00:05.000",
+                1,
+            )],
+            "C:/Logs/DeviceHealthMonitoring.log",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, IntuneEventType::Other);
+        assert_eq!(events[0].status, IntuneStatus::Failed);
+        assert_eq!(
+            events[0].name,
+            "DeviceHealthMonitoring App Crash: SenseNdr.exe (c0000409)"
+        );
+    }
+
+    #[test]
+    fn sensor_extracts_memory_failure() {
+        let events = extract_events(
+            &[line(
+                "Win32Exception occurred. Error: 0; Message: Call to GetPhysicallyInstalledSystemMemory failed.; Stacktrace:",
+                "01-15-2024 10:00:05.000",
+                1,
+            )],
+            "C:/Logs/Sensor.log",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, IntuneEventType::Other);
+        assert_eq!(events[0].status, IntuneStatus::Failed);
+        assert_eq!(events[0].name, "Sensor Hardware Readiness Memory Failure");
+    }
+
+    #[test]
+    fn win32_app_inventory_extracts_non_zero_delta() {
+        let events = extract_events(
+            &[line(
+                "[Win32AppInventory] Computing delta inventory...Done. Add count = 2, Modify count = 0, Delete count = 2",
+                "01-15-2024 10:00:05.000",
+                1,
+            )],
+            "C:/Logs/Win32AppInventory.log",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, IntuneEventType::Other);
+        assert_eq!(events[0].status, IntuneStatus::Success);
+        assert_eq!(events[0].name, "Win32AppInventory Delta (+2 ~0 -2)");
+    }
+
+    #[test]
+    fn win32_app_inventory_ignores_no_user_skip_noise() {
+        let events = extract_events(
+            &[line(
+                "[Win32AppInventory] OnAppInventoryCollecting There is no any AAD User logged in, skip this round of inventory collection.",
+                "01-15-2024 10:00:05.000",
+                1,
+            )],
+            "C:/Logs/Win32AppInventory.log",
+        );
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
     fn paired_completion_events_are_collapsed() {
         let events = extract_events(
             &[
@@ -854,5 +1416,30 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].status, IntuneStatus::Success);
         assert_eq!(events[0].duration_secs, Some(60.0));
+    }
+
+    #[test]
+    fn appworkload_request_payload_events_are_paired() {
+        let events = extract_events(
+            &[
+                line(
+                    r#"Starting content download RequestPayload: {\"AppId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\"ApplicationName\":\"Contoso App\"}"#,
+                    "01-15-2024 10:00:00.000",
+                    1,
+                ),
+                line(
+                    r#"Download completed successfully RequestPayload: {\"AppId\":\"a1b2c3d4-e5f6-7890-abcd-ef1234567890\",\"ApplicationName\":\"Contoso App\"}"#,
+                    "01-15-2024 10:00:05.000",
+                    2,
+                ),
+            ],
+            "C:/Logs/AppWorkload.log",
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, IntuneEventType::ContentDownload);
+        assert_eq!(events[0].status, IntuneStatus::Success);
+        assert_eq!(events[0].guid.as_deref(), Some("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
+        assert_eq!(events[0].duration_secs, Some(5.0));
     }
 }
