@@ -55,7 +55,7 @@ function Get-UtcTimestamp {
     return (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 }
 
-function Ensure-Directory {
+function Initialize-Directory {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
@@ -66,7 +66,7 @@ function Ensure-Directory {
     }
 }
 
-function Ensure-ParentDirectory {
+function Initialize-ParentDirectory {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
@@ -74,7 +74,7 @@ function Ensure-ParentDirectory {
 
     $parentPath = Split-Path -Parent $Path
     if (-not [string]::IsNullOrWhiteSpace($parentPath)) {
-        Ensure-Directory -Path $parentPath
+        Initialize-Directory -Path $parentPath
     }
 }
 
@@ -134,7 +134,7 @@ function Write-JsonFile {
         [string]$Path
     )
 
-    Ensure-ParentDirectory -Path $Path
+    Initialize-ParentDirectory -Path $Path
     $utf8Encoding = New-Object System.Text.UTF8Encoding($false)
     $json = $InputObject | ConvertTo-Json -Depth 12
     [System.IO.File]::WriteAllText($Path, $json, $utf8Encoding)
@@ -148,7 +148,7 @@ function Write-TextFile {
         [string]$Path
     )
 
-    Ensure-ParentDirectory -Path $Path
+    Initialize-ParentDirectory -Path $Path
     $utf8Encoding = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($Path, $Content, $utf8Encoding)
 }
@@ -158,7 +158,7 @@ function Start-CollectorTranscript {
     $logFileName = 'collector-{0}-{1}-{2}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), (ConvertTo-SafeFileName -Value $env:COMPUTERNAME), $PID
     $script:CollectorRunLogPath = Join-Path $logRoot $logFileName
 
-    Ensure-Directory -Path $logRoot
+    Initialize-Directory -Path $logRoot
 
     try {
         $null = Start-Transcript -LiteralPath $script:CollectorRunLogPath -Force -UseMinimalHeader -IncludeInvocationHeader -ErrorAction Stop
@@ -303,29 +303,29 @@ function Assert-CollectorProfileShape {
 
     $sectionDefinitions = @(
         @{
-            name             = 'logs'
-            requiredStrings  = @('id', 'family', 'sourcePattern', 'destinationFolder')
-            optionalArrays   = @('parseHints')
+            name            = 'logs'
+            requiredStrings = @('id', 'family', 'sourcePattern', 'destinationFolder')
+            optionalArrays  = @('parseHints')
         },
         @{
-            name             = 'registry'
-            requiredStrings  = @('id', 'family', 'path', 'fileName')
-            optionalArrays   = @()
+            name            = 'registry'
+            requiredStrings = @('id', 'family', 'path', 'fileName')
+            optionalArrays  = @()
         },
         @{
-            name             = 'eventLogs'
-            requiredStrings  = @('id', 'family', 'channel', 'fileName')
-            optionalArrays   = @()
+            name            = 'eventLogs'
+            requiredStrings = @('id', 'family', 'channel', 'fileName')
+            optionalArrays  = @()
         },
         @{
-            name             = 'exports'
-            requiredStrings  = @('id', 'family', 'sourcePath')
-            optionalArrays   = @('parseHints')
+            name            = 'exports'
+            requiredStrings = @('id', 'family', 'sourcePath')
+            optionalArrays  = @('parseHints')
         },
         @{
-            name             = 'commands'
-            requiredStrings  = @('id', 'family', 'command', 'fileName')
-            optionalArrays   = @('arguments')
+            name            = 'commands'
+            requiredStrings = @('id', 'family', 'command', 'fileName')
+            optionalArrays  = @('arguments')
         }
     )
 
@@ -543,7 +543,7 @@ function Add-GeneratedCommandArtifacts {
         }
 
         try {
-            Ensure-ParentDirectory -Path $destinationPath
+            Initialize-ParentDirectory -Path $destinationPath
             Copy-Item -LiteralPath $resolvedSourcePath -Destination $destinationPath -Force
             $sourceFile = Get-Item -LiteralPath $resolvedSourcePath -ErrorAction Stop
             $artifact = New-ArtifactRecord -Category 'export' -Family $family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'collected' -ParseHints $parseHints -FilePath $destinationPath -Notes $notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -564,7 +564,7 @@ function New-MdmDiagnosticsCommandItem {
     )
 
     $stagingRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('CmtraceOpen-{0}' -f $BundleId)
-    Ensure-Directory -Path $stagingRoot
+    Initialize-Directory -Path $stagingRoot
 
     $zipPath = Join-Path $stagingRoot 'MDMDiagReport.zip'
 
@@ -826,7 +826,7 @@ try {
 
     Write-Step 'Creating bundle structure'
     foreach ($path in @($bundleRoot, $evidenceRoot, $logRoot, $registryRoot, $eventLogRoot, $exportRoot, $screenshotRoot, $commandOutputRoot)) {
-        Ensure-Directory -Path $path
+        Initialize-Directory -Path $path
     }
 
     $commandItems = New-Object System.Collections.Generic.List[object]
@@ -858,7 +858,7 @@ try {
             $destinationPath = ConvertTo-PhysicalPath -Root $bundleRoot -RelativePath $relativePath
 
             try {
-                Ensure-ParentDirectory -Path $destinationPath
+                Initialize-ParentDirectory -Path $destinationPath
                 Copy-Item -LiteralPath $sourceFile.FullName -Destination $destinationPath -Force
                 $artifact = New-ArtifactRecord -Category 'log' -Family $logItem.family -RelativePath $relativePath -OriginPath $sourceFile.FullName -Status 'collected' -ParseHints $logItem.parseHints -FilePath $destinationPath -Notes $logItem.notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
             }
@@ -883,7 +883,7 @@ try {
             continue
         }
 
-        Ensure-ParentDirectory -Path $destinationPath
+        Initialize-ParentDirectory -Path $destinationPath
         & reg.exe export $registryItem.path $destinationPath /y | Out-Null
         $exitCode = $LASTEXITCODE
 
@@ -911,7 +911,7 @@ try {
             continue
         }
 
-        Ensure-ParentDirectory -Path $destinationPath
+        Initialize-ParentDirectory -Path $destinationPath
         & wevtutil.exe epl $eventItem.channel $destinationPath /ow:true | Out-Null
         $exitCode = $LASTEXITCODE
 
@@ -943,7 +943,7 @@ try {
         }
 
         try {
-            Ensure-ParentDirectory -Path $destinationPath
+            Initialize-ParentDirectory -Path $destinationPath
             Copy-Item -LiteralPath $resolvedSourcePath -Destination $destinationPath -Force
             $sourceFile = Get-Item -LiteralPath $resolvedSourcePath -ErrorAction Stop
             $artifact = New-ArtifactRecord -Category 'export' -Family $exportItem.family -RelativePath $relativePath -OriginPath $resolvedSourcePath -Status 'collected' -ParseHints $exportItem.parseHints -FilePath $destinationPath -Notes $exportItem.notes -StartUtc $sourceFile.CreationTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ') -EndUtc $sourceFile.LastWriteTimeUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -1048,27 +1048,27 @@ try {
             required     = $false
             reason       = 'Useful for enrollment, policy, and IME state.'
         },
-    [ordered]@{
-        category     = 'event-log'
-        relativePath = 'evidence/event-logs'
-        required     = $false
-        reason       = 'Curated adjacent evidence for MDM, enrollment, and Autopilot.'
-    },
-    [ordered]@{
-        category     = 'export'
-        relativePath = 'evidence/exports'
-        required     = $false
-        reason       = 'Exported supporting artifacts such as live Autopilot JSON state.'
-    },
-    [ordered]@{
-        category     = 'command-output'
-        relativePath = 'evidence/command-output'
-        required     = $false
-        reason       = 'Point-in-time command output for device join and identity state.'
-    }
-)
+        [ordered]@{
+            category     = 'event-log'
+            relativePath = 'evidence/event-logs'
+            required     = $false
+            reason       = 'Curated adjacent evidence for MDM, enrollment, and Autopilot.'
+        },
+        [ordered]@{
+            category     = 'export'
+            relativePath = 'evidence/exports'
+            required     = $false
+            reason       = 'Exported supporting artifacts such as live Autopilot JSON state.'
+        },
+        [ordered]@{
+            category     = 'command-output'
+            relativePath = 'evidence/command-output'
+            required     = $false
+            reason       = 'Point-in-time command output for device join and identity state.'
+        }
+    )
 
-$notesContent = @"
+    $notesContent = @"
 # Investigation Notes
 
 ## Case Summary
@@ -1095,101 +1095,101 @@ $notesContent = @"
 - Upload requested: $uploadRequested
 - Upload destination: $($uploadInfo.destination)
 "@
-Write-TextFile -Content $notesContent.Trim() -Path $notesPath
+    Write-TextFile -Content $notesContent.Trim() -Path $notesPath
 
-$manifest = [ordered]@{
-    schemaVersion    = '1.0'
-    bundle           = [ordered]@{
-        bundleId      = $bundleId
-        bundleLabel   = $sanitizedBundleLabel
-        createdUtc    = $manifestCreatedUtc
-        caseReference = $manifestCaseReference
-        summary       = 'Curated endpoint evidence bundle collected for Intune and adjacent Windows diagnostics.'
-        operator      = [ordered]@{
-            name    = $OperatorName
-            team    = $OperatorTeam
-            contact = $operatorContactValue
+    $manifest = [ordered]@{
+        schemaVersion    = '1.0'
+        bundle           = [ordered]@{
+            bundleId      = $bundleId
+            bundleLabel   = $sanitizedBundleLabel
+            createdUtc    = $manifestCreatedUtc
+            caseReference = $manifestCaseReference
+            summary       = 'Curated endpoint evidence bundle collected for Intune and adjacent Windows diagnostics.'
+            operator      = [ordered]@{
+                name    = $OperatorName
+                team    = $OperatorTeam
+                contact = $operatorContactValue
+            }
+            device        = $deviceContext.device
         }
-        device        = $deviceContext.device
-    }
-    collection       = [ordered]@{
-        method              = 'intune-powershell-script'
-        collectorProfile    = $collectorProfile.profileName
-        collectorVersion    = $script:CollectorVersion
-        sourceRoot          = $OutputRoot
-        collectedBy         = $OperatorName
-        collectedUtc        = $manifestCreatedUtc
-        chainOfCustodyNotes = 'Collected locally with built-in PowerShell and native Windows tools. Missing or failed artifacts are retained in this manifest.'
-        results             = [ordered]@{
-            artifactCounts = $statusCounts
-            zipFileName    = $zipFileName
-            upload         = $uploadInfo
+        collection       = [ordered]@{
+            method              = 'intune-powershell-script'
+            collectorProfile    = $collectorProfile.profileName
+            collectorVersion    = $script:CollectorVersion
+            sourceRoot          = $OutputRoot
+            collectedBy         = $OperatorName
+            collectedUtc        = $manifestCreatedUtc
+            chainOfCustodyNotes = 'Collected locally with built-in PowerShell and native Windows tools. Missing or failed artifacts are retained in this manifest.'
+            results             = [ordered]@{
+                artifactCounts = $statusCounts
+                zipFileName    = $zipFileName
+                upload         = $uploadInfo
+            }
+        }
+        intakeHints      = [ordered]@{
+            manifestPath       = 'manifest.json'
+            notesPath          = 'notes.md'
+            evidenceRoot       = 'evidence'
+            primaryEntryPoints = $primaryEntryPoints
+        }
+        artifacts        = $artifactArray
+        expectedEvidence = $expectedEvidence
+        analysis         = [ordered]@{
+            status            = 'not-started'
+            priorityQuestions = @(
+                'What failed, and when was it first observed?',
+                'Which expected artifacts are missing or incomplete?',
+                'Which collected artifact should be treated as the lead source?'
+            )
+            observedGaps      = $analysisObservedGaps
+            handoffSummary    = 'Start with evidence/logs, evidence/exports, and dsregcmd-status.txt, then use the manifest to review missing or failed collections.'
         }
     }
-    intakeHints      = [ordered]@{
-        manifestPath       = 'manifest.json'
-        notesPath          = 'notes.md'
-        evidenceRoot       = 'evidence'
-        primaryEntryPoints = $primaryEntryPoints
+
+    Write-JsonFile -InputObject $manifest -Path $manifestPath
+
+    Write-Step 'Compressing evidence bundle'
+    if (Test-Path -LiteralPath $zipPath) {
+        Remove-Item -LiteralPath $zipPath -Force
     }
-    artifacts        = $artifactArray
-    expectedEvidence = $expectedEvidence
-    analysis         = [ordered]@{
-        status            = 'not-started'
-        priorityQuestions = @(
-            'What failed, and when was it first observed?',
-            'Which expected artifacts are missing or incomplete?',
-            'Which collected artifact should be treated as the lead source?'
-        )
-        observedGaps      = $analysisObservedGaps
-        handoffSummary    = 'Start with evidence/logs, evidence/exports, and dsregcmd-status.txt, then use the manifest to review missing or failed collections.'
+    Compress-Archive -LiteralPath $bundleRoot -DestinationPath $zipPath -CompressionLevel Optimal -Force
+
+    $uploadStatus = [ordered]@{
+        attempted   = $uploadRequested
+        uploaded    = $false
+        destination = $uploadInfo.destination
+        statusCode  = $null
+        error       = $null
     }
-}
 
-Write-JsonFile -InputObject $manifest -Path $manifestPath
-
-Write-Step 'Compressing evidence bundle'
-if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
-}
-Compress-Archive -LiteralPath $bundleRoot -DestinationPath $zipPath -CompressionLevel Optimal -Force
-
-$uploadStatus = [ordered]@{
-    attempted   = $uploadRequested
-    uploaded    = $false
-    destination = $uploadInfo.destination
-    statusCode  = $null
-    error       = $null
-}
-
-if ($uploadRequested) {
-    Write-Step 'Uploading zip to Azure Blob Storage'
-    try {
-        $uploadResult = Invoke-BlobUpload -ZipPath $zipPath -UploadUrl $resolvedUpload.uploadUrl
-        $uploadStatus.uploaded = $true
-        $uploadStatus.statusCode = $uploadResult.statusCode
+    if ($uploadRequested) {
+        Write-Step 'Uploading zip to Azure Blob Storage'
+        try {
+            $uploadResult = Invoke-BlobUpload -ZipPath $zipPath -UploadUrl $resolvedUpload.uploadUrl
+            $uploadStatus.uploaded = $true
+            $uploadStatus.statusCode = $uploadResult.statusCode
+        }
+        catch {
+            $uploadStatus.error = Protect-SecretText -Text $_.Exception.Message
+            Write-Warning ('Upload failed: {0}' -f $uploadStatus.error)
+        }
     }
-    catch {
-        $uploadStatus.error = Protect-SecretText -Text $_.Exception.Message
-        Write-Warning ('Upload failed: {0}' -f $uploadStatus.error)
+    else {
+        Write-Step 'Skipping upload because no SAS destination was provided'
     }
-}
-else {
-    Write-Step 'Skipping upload because no SAS destination was provided'
-}
 
-$result = [pscustomobject]@{
-    BundleId       = $bundleId
-    BundleRoot     = $bundleRoot
-    ManifestPath   = $manifestPath
-    NotesPath      = $notesPath
-    ZipPath        = $zipPath
-    CollectorLogPath = $script:CollectorRunLogPath
-    ArtifactCounts = $statusCounts
-    UploadStatus   = $uploadStatus
-}
+    $result = [pscustomobject]@{
+        BundleId         = $bundleId
+        BundleRoot       = $bundleRoot
+        ManifestPath     = $manifestPath
+        NotesPath        = $notesPath
+        ZipPath          = $zipPath
+        CollectorLogPath = $script:CollectorRunLogPath
+        ArtifactCounts   = $statusCounts
+        UploadStatus     = $uploadStatus
+    }
 
-Write-Step 'Collection complete'
+    Write-Step 'Collection complete'
     $result
 }
 catch {

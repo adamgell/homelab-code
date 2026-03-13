@@ -287,7 +287,7 @@ function Initialize-BootstrapTranscript {
 
 Initialize-BootstrapTranscript
 
-function Ensure-Directory {
+function Initialize-Directory {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Path
@@ -350,7 +350,7 @@ function ConvertFrom-JsonCompat {
     }
 }
 
-function Quote-TaskArgument {
+function Format-TaskArgument {
     param(
         [AllowEmptyString()]
         [string]$Value
@@ -386,7 +386,7 @@ function Test-PlaceholderUrl {
     return $Value -like 'https://example.invalid/*'
 }
 
-function Download-File {
+function Get-File {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Url,
@@ -554,7 +554,7 @@ function Install-PowerShellMsi {
     }
 
     Write-Step 'Downloading PowerShell MSI payload'
-    Download-File -Url $Url -DestinationPath $DestinationPath
+    Get-File -Url $Url -DestinationPath $DestinationPath
 
     Write-Step 'Installing PowerShell MSI payload'
     $installerProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList ('/i "{0}" /qn /norestart ALLUSERS=1' -f $DestinationPath) -Wait -PassThru -WindowStyle Hidden
@@ -569,7 +569,7 @@ function Install-PowerShellMsi {
     }
 }
 
-function Ensure-PowerShellExecutable {
+function Initialize-PowerShellExecutable {
     param(
         [Parameter(Mandatory = $true)]
         [version]$MinimumVersion,
@@ -760,7 +760,7 @@ function Assert-ValidJsonFile {
     }
 }
 
-function Validate-StagedPayloads {
+function Assert-StagedPayloads {
     param(
         [Parameter(Mandatory = $true)]
         [string]$CollectorPath,
@@ -885,31 +885,31 @@ function New-CollectorArgumentString {
     $arguments.Add('-ExecutionPolicy')
     $arguments.Add('Bypass')
     $arguments.Add('-File')
-    $arguments.Add((Quote-TaskArgument -Value $CollectorPath))
+    $arguments.Add((Format-TaskArgument -Value $CollectorPath))
     $arguments.Add('-CollectorProfilePath')
-    $arguments.Add((Quote-TaskArgument -Value $ProfilePath))
+    $arguments.Add((Format-TaskArgument -Value $ProfilePath))
     $arguments.Add('-OutputRoot')
-    $arguments.Add((Quote-TaskArgument -Value $CollectorOutputRoot))
+    $arguments.Add((Format-TaskArgument -Value $CollectorOutputRoot))
     $arguments.Add('-BundleLabel')
-    $arguments.Add((Quote-TaskArgument -Value $CollectorBundleLabel))
+    $arguments.Add((Format-TaskArgument -Value $CollectorBundleLabel))
     $arguments.Add('-OperatorName')
-    $arguments.Add((Quote-TaskArgument -Value $CollectorOperatorName))
+    $arguments.Add((Format-TaskArgument -Value $CollectorOperatorName))
     $arguments.Add('-OperatorTeam')
-    $arguments.Add((Quote-TaskArgument -Value $CollectorOperatorTeam))
+    $arguments.Add((Format-TaskArgument -Value $CollectorOperatorTeam))
 
     if (-not [string]::IsNullOrWhiteSpace($CollectorCaseReference)) {
         $arguments.Add('-CaseReference')
-        $arguments.Add((Quote-TaskArgument -Value $CollectorCaseReference))
+        $arguments.Add((Format-TaskArgument -Value $CollectorCaseReference))
     }
 
     if (-not [string]::IsNullOrWhiteSpace($CollectorBlobName)) {
         $arguments.Add('-BlobName')
-        $arguments.Add((Quote-TaskArgument -Value $CollectorBlobName))
+        $arguments.Add((Format-TaskArgument -Value $CollectorBlobName))
     }
 
     if (-not [string]::IsNullOrWhiteSpace($CollectorOperatorContact)) {
         $arguments.Add('-OperatorContact')
-        $arguments.Add((Quote-TaskArgument -Value $CollectorOperatorContact))
+        $arguments.Add((Format-TaskArgument -Value $CollectorOperatorContact))
     }
 
     if ($RunLocalOnly) {
@@ -917,7 +917,7 @@ function New-CollectorArgumentString {
     }
     elseif (-not [string]::IsNullOrWhiteSpace($ResolvedSasUrl)) {
         $arguments.Add('-SasUrl')
-        $arguments.Add((Quote-TaskArgument -Value $ResolvedSasUrl))
+        $arguments.Add((Format-TaskArgument -Value $ResolvedSasUrl))
     }
 
     return ($arguments -join ' ')
@@ -968,9 +968,9 @@ try {
 
     $script:BootstrapStage = 'prepare-directories'
     Write-Step 'Preparing bootstrap directories'
-    Ensure-Directory -Path $StagingRoot
-    Ensure-Directory -Path $StateRoot
-    Ensure-Directory -Path $OutputRoot
+    Initialize-Directory -Path $StagingRoot
+    Initialize-Directory -Path $StateRoot
+    Initialize-Directory -Path $OutputRoot
 
     if (Test-PlaceholderUrl -Value $CollectorScriptUrl) {
         throw 'CollectorScriptUrl still points to the example.invalid placeholder. Provide a reachable HTTPS URL for the collector payload.'
@@ -1006,11 +1006,11 @@ try {
 
     $script:BootstrapStage = 'stage-payloads'
     Write-Step 'Downloading staged collector payloads'
-    Download-File -Url $CollectorScriptUrl -DestinationPath $stagedCollectorPath
-    Download-File -Url $CollectorProfileUrl -DestinationPath $stagedProfilePath
+    Get-File -Url $CollectorScriptUrl -DestinationPath $stagedCollectorPath
+    Get-File -Url $CollectorProfileUrl -DestinationPath $stagedProfilePath
 
     Write-Step 'Validating staged collector payloads'
-    Validate-StagedPayloads -CollectorPath $stagedCollectorPath -ProfilePath $stagedProfilePath -ProfileSource $CollectorProfileUrl
+    Assert-StagedPayloads -CollectorPath $stagedCollectorPath -ProfilePath $stagedProfilePath -ProfileSource $CollectorProfileUrl
     Write-StageStatus -Stage 'payloads' -Status 'ready' -Details @{
         collector  = $stagedCollectorPath
         profile    = $stagedProfilePath
@@ -1020,7 +1020,7 @@ try {
 
     $script:BootstrapStage = 'resolve-runtime'
     Write-Step 'Resolving PowerShell runtime'
-    $powerShellResolution = Ensure-PowerShellExecutable -MinimumVersion $RequiredPowerShellVersion -MsiUrl $PowerShellMsiUrl -MsiPath $stagedPowerShellMsiPath
+    $powerShellResolution = Initialize-PowerShellExecutable -MinimumVersion $RequiredPowerShellVersion -MsiUrl $PowerShellMsiUrl -MsiPath $stagedPowerShellMsiPath
     Write-StageStatus -Stage 'runtime' -Status 'ready' -Details @{
         executable = $powerShellResolution.ExecutablePath
         transcript = $script:BootstrapTranscriptPath

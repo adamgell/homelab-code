@@ -18,8 +18,8 @@ Usage:
   ./scripts/Launch-CMTraceOpen.sh --mode <dev|build|build-and-run> [--install-dependencies]
 
 Modes:
-  dev            Run `npm run tauri dev` with Vite hot reload for frontend changes.
-  build          Run `npm run tauri build`.
+  dev            Run `npm run app:dev` with Vite hot reload for frontend changes.
+  build          Run `npm run app:build:release`.
   build-and-run  Build the macOS app bundle and open it with `open`.
 
 Accepted aliases:
@@ -49,7 +49,21 @@ invoke_checked_command() {
   fi
 }
 
-resolve_built_app_path() {
+resolve_mode_script() {
+  case "$1" in
+    Dev)
+      printf 'app:dev\n'
+      ;;
+    Build|BuildAndRun)
+      printf 'app:build:release\n'
+      ;;
+    *)
+      fail "Invalid mode '$1'. Expected one of: Dev, Build, or BuildAndRun."
+      ;;
+  esac
+}
+
+resolve_built_artifact_path() {
   local app_root="$1"
   local bundle_dir="${app_root}/src-tauri/target/release/bundle/macos"
   local default_app="${bundle_dir}/CMTrace Open.app"
@@ -161,17 +175,12 @@ else
   write_step "Skipping npm install because node_modules already exists. Use --install-dependencies to force reinstall."
 fi
 
-case "${mode}" in
-  Dev)
-    invoke_checked_command npm run tauri dev
-    ;;
-  Build)
-    invoke_checked_command npm run tauri build
-    ;;
-  BuildAndRun)
-    invoke_checked_command npm run tauri build
+npm_script="$(resolve_mode_script "${mode}")"
+invoke_checked_command npm run "${npm_script}"
 
-    built_app="$(resolve_built_app_path "${app_root}")"
+case "${mode}" in
+  BuildAndRun)
+    built_app="$(resolve_built_artifact_path "${app_root}")"
     write_step "Launching built app from '${built_app}'"
     invoke_checked_command open "${built_app}"
     ;;

@@ -19,9 +19,9 @@ function Write-Step {
 
 function Resolve-VsWherePath {
     $candidates = @((
-        (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
-        (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe')
-    ) | Where-Object { $_ -and (Test-Path $_) })
+            (Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'),
+            (Join-Path $env:ProgramFiles 'Microsoft Visual Studio\Installer\vswhere.exe')
+        ) | Where-Object { $_ -and (Test-Path $_) })
 
     if ($candidates.Count -gt 0) {
         return $candidates[0]
@@ -70,7 +70,36 @@ function Invoke-CheckedCommand {
     }
 }
 
-function Get-BuiltExecutablePath {
+function Get-ModeConfiguration {
+    param(
+        [Parameter(Mandatory = $true)]
+        [ValidateSet('Dev', 'Build', 'BuildAndRun')]
+        [string]$Mode
+    )
+
+    switch ($Mode) {
+        'Dev' {
+            return @{
+                NpmScript             = 'app:dev'
+                RequiresBuiltArtifact = $false
+            }
+        }
+        'Build' {
+            return @{
+                NpmScript             = 'app:build:release'
+                RequiresBuiltArtifact = $false
+            }
+        }
+        'BuildAndRun' {
+            return @{
+                NpmScript             = 'app:build:release'
+                RequiresBuiltArtifact = $true
+            }
+        }
+    }
+}
+
+function Resolve-BuiltArtifactPath {
     param(
         [Parameter(Mandatory = $true)]
         [string]$AppRoot
@@ -82,8 +111,8 @@ function Get-BuiltExecutablePath {
     }
 
     $candidate = Get-ChildItem -Path $releaseDirectory -Filter '*.exe' -File |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -First 1
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
 
     if (-not $candidate) {
         throw "No built executable was found in '$releaseDirectory'."
@@ -104,22 +133,16 @@ Set-Location $appRoot
 
 if ($InstallDependencies -or -not (Test-Path $nodeModulesPath)) {
     Invoke-CheckedCommand -Command 'npm.cmd' -Arguments @('install')
-} else {
+}
+else {
     Write-Step 'Skipping npm install because node_modules already exists. Use -InstallDependencies to force reinstall.'
 }
 
-switch ($Mode) {
-    'Dev' {
-        Invoke-CheckedCommand -Command 'npm.cmd' -Arguments @('run', 'tauri', 'dev')
-    }
-    'Build' {
-        Invoke-CheckedCommand -Command 'npm.cmd' -Arguments @('run', 'tauri', 'build')
-    }
-    'BuildAndRun' {
-        Invoke-CheckedCommand -Command 'npm.cmd' -Arguments @('run', 'tauri', 'build')
+$modeConfiguration = Get-ModeConfiguration -Mode $Mode
+Invoke-CheckedCommand -Command 'npm.cmd' -Arguments @('run', $modeConfiguration.NpmScript)
 
-        $builtExecutable = Get-BuiltExecutablePath -AppRoot $appRoot
-        Write-Step "Launching built app from '$builtExecutable'"
-        Start-Process -FilePath $builtExecutable
-    }
+if ($modeConfiguration.RequiresBuiltArtifact) {
+    $builtExecutable = Resolve-BuiltArtifactPath -AppRoot $appRoot
+    Write-Step "Launching built app from '$builtExecutable'"
+    Start-Process -FilePath $builtExecutable
 }

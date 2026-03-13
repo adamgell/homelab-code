@@ -1,11 +1,14 @@
 # Dependencies
 node_modules/
 
-# Build output
+# Frontend build output
 dist/
 
-# Rust
+# Tauri and Rust generated output
+# src-tauri/target is the canonical Cargo output directory for this project.
 src-tauri/target/
+src-tauri/target-tests/
+src-tauri/gen/schemas/
 
 # IDE
 .vscode/

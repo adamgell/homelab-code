@@ -4,9 +4,15 @@
   "private": true,
   "description": "Open-source CMTrace log viewer with built-in Intune diagnostics",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
+    "frontend:dev": "vite",
+    "frontend:build": "tsc && vite build",
+    "frontend:preview": "vite preview",
+    "app:dev": "tauri dev",
+    "app:build:debug": "tauri build --debug",
+    "app:build:release": "tauri build",
+    "dev": "npm run frontend:dev",
+    "build": "npm run frontend:build",
+    "preview": "npm run frontend:preview",
     "tauri": "tauri"
   },
   "license": "MIT",
